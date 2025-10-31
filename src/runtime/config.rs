@@ -1,23 +1,11 @@
 //! Runtime configuration for isolate-per-tenant execution.
 //!
 //! This module defines the configuration structure for JavaScript runtimes,
-//! including heap limits, permission manifests, and bootstrap options.
+//! including heap limits and bootstrap options.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use std::time::Duration;
-
-/// Permission types for runtime operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Surface area for host integrations even if Rust impls lag behind.
-pub enum Permission {
-    /// Allow timer operations (setTimeout, setInterval)
-    Timers,
-    /// Allow network access with optional host restriction
-    Net(Option<String>),
-    /// Allow file system access with optional path restriction
-    File(Option<String>),
-}
 
 /// Runtime configuration for a single JavaScript isolate.
 #[pyclass(module = "jsrun")]
@@ -29,9 +17,6 @@ pub struct RuntimeConfig {
 
     /// Initial heap size in bytes (None = V8 default)
     pub initial_heap_size: Option<usize>,
-
-    /// Permissions granted to this runtime
-    pub permissions: Vec<Permission>,
 
     /// Optional timeout for script execution
     pub execution_timeout: Option<Duration>,
@@ -48,15 +33,13 @@ impl RuntimeConfig {
         max_heap_size = None,
         initial_heap_size = None,
         bootstrap = None,
-        timeout = None,
-        permissions = None
+        timeout = None
     ))]
     fn new(
         max_heap_size: Option<usize>,
         initial_heap_size: Option<usize>,
         bootstrap: Option<String>,
         timeout: Option<&Bound<'_, PyAny>>,
-        permissions: Option<Vec<(String, Option<String>)>>,
     ) -> PyResult<Self> {
         let mut config = RuntimeConfig::default();
 
@@ -98,24 +81,6 @@ impl RuntimeConfig {
                 }
             };
             config.execution_timeout = Some(duration);
-        }
-
-        // Add permissions if provided
-        if let Some(permissions_list) = permissions {
-            for (kind, scope) in permissions_list {
-                let permission = match kind.as_str() {
-                    "timers" => Permission::Timers,
-                    "net" => Permission::Net(scope),
-                    "file" => Permission::File(scope),
-                    other => {
-                        return Err(PyValueError::new_err(format!(
-                            "Unknown permission '{}', expected 'timers', 'net', or 'file'",
-                            other
-                        )))
-                    }
-                };
-                config.permissions.push(permission);
-            }
         }
 
         Ok(config)
@@ -191,45 +156,6 @@ impl RuntimeConfig {
         Ok(())
     }
 
-    /// Get the list of permissions as tuples (kind, scope).
-    #[getter]
-    fn permissions(&self) -> Vec<(String, Option<String>)> {
-        self.permissions
-            .iter()
-            .map(|p| match p {
-                Permission::Timers => ("timers".to_string(), None),
-                Permission::Net(scope) => ("net".to_string(), scope.clone()),
-                Permission::File(scope) => ("file".to_string(), scope.clone()),
-            })
-            .collect()
-    }
-
-    /// Set permissions for the runtime.
-    /// Accepts a list of tuples [(kind, scope), ...]
-    #[setter]
-    fn set_permissions(&mut self, permissions: Vec<(String, Option<String>)>) -> PyResult<()> {
-        // Clear existing permissions
-        self.permissions.clear();
-
-        // Add new permissions
-        for (kind, scope) in permissions {
-            let permission = match kind.as_str() {
-                "timers" => Permission::Timers,
-                "net" => Permission::Net(scope),
-                "file" => Permission::File(scope),
-                other => {
-                    return Err(PyValueError::new_err(format!(
-                        "Unknown permission '{}', expected 'timers', 'net', or 'file'",
-                        other
-                    )))
-                }
-            };
-            self.permissions.push(permission);
-        }
-
-        Ok(())
-    }
-
     fn __repr__(&self) -> String {
         format!("RuntimeConfig({:?})", self)
     }
@@ -244,7 +170,6 @@ mod tests {
         let config = RuntimeConfig::default();
         assert!(config.max_heap_size.is_none());
         assert!(config.initial_heap_size.is_none());
-        assert!(config.permissions.is_empty());
         assert!(config.execution_timeout.is_none());
         assert!(config.bootstrap_script.is_none());
     }
@@ -254,21 +179,9 @@ mod tests {
     fn test_config_builder() {
         let mut config = RuntimeConfig::default();
         config.max_heap_size = Some(100 * 1024 * 1024);
-        config.permissions.push(Permission::Timers);
-        config
-            .permissions
-            .push(Permission::Net(Some("example.com".to_string())));
-        config
-            .permissions
-            .push(Permission::File(Some("/tmp".to_string())));
         config.execution_timeout = Some(Duration::from_secs(30));
 
         assert_eq!(config.max_heap_size, Some(100 * 1024 * 1024));
-        assert_eq!(config.permissions.len(), 3);
-        assert!(config.permissions.contains(&Permission::Timers));
-        assert!(config
-            .permissions
-            .contains(&Permission::File(Some("/tmp".to_string()))));
         assert_eq!(config.execution_timeout, Some(Duration::from_secs(30)));
     }
 }

@@ -6,6 +6,8 @@ isolates, run sync/async JS, preserve state, enforce shutdown semantics, and
 surface promise/timeouts/errors consistently with the Rust core.
 """
 
+import math
+import time
 import pytest
 from jsrun import Runtime
 
@@ -25,7 +27,7 @@ class TestRuntimeBasics:
         runtime = Runtime()
         try:
             result = runtime.eval("2 + 2")
-            assert result == "4"
+            assert result == 4
         finally:
             runtime.close()
 
@@ -43,7 +45,7 @@ class TestRuntimeBasics:
         runtime = Runtime()
         try:
             result = runtime.eval("Math.max(10, 20, 30)")
-            assert result == "30"
+            assert result == 30
         finally:
             runtime.close()
 
@@ -81,11 +83,11 @@ class TestRuntimeStatePersistence:
         try:
             runtime.eval("var x = 10;")
             result = runtime.eval("x")
-            assert result == "10"
+            assert result == 10
 
             runtime.eval("x = 20;")
             result = runtime.eval("x")
-            assert result == "20"
+            assert result == 20
         finally:
             runtime.close()
 
@@ -95,7 +97,7 @@ class TestRuntimeStatePersistence:
         try:
             runtime.eval("function add(a, b) { return a + b; }")
             result = runtime.eval("add(5, 7)")
-            assert result == "12"
+            assert result == 12
         finally:
             runtime.close()
 
@@ -108,11 +110,11 @@ class TestRuntimeStatePersistence:
             assert result == "test"
 
             result = runtime.eval("obj.value")
-            assert result == "42"
+            assert result == 42
 
             runtime.eval("obj.value = 100;")
             result = runtime.eval("obj.value")
-            assert result == "100"
+            assert result == 100
         finally:
             runtime.close()
 
@@ -125,7 +127,7 @@ class TestRuntimeStatePersistence:
             for i in range(1, 6):
                 runtime.eval("counter++;")
                 result = runtime.eval("counter")
-                assert result == str(i)
+                assert result == i
         finally:
             runtime.close()
 
@@ -137,7 +139,7 @@ class TestRuntimeContextManager:
         """Test basic context manager usage."""
         with Runtime() as runtime:
             result = runtime.eval("3 + 3")
-            assert result == "6"
+            assert result == 6
         # Runtime should be closed after exiting context
 
     def test_context_manager_auto_close(self):
@@ -147,7 +149,7 @@ class TestRuntimeContextManager:
 
         with runtime:
             result = runtime.eval("5 * 5")
-            assert result == "25"
+            assert result == 25
             assert not runtime.is_closed()
 
         # Should be closed after exiting
@@ -195,7 +197,7 @@ class TestRuntimeConcurrent:
             runtime = Runtime()
             try:
                 result = runtime.eval(f"{i} * 2")
-                assert result == str(i * 2)
+                assert result == i * 2
             finally:
                 runtime.close()
 
@@ -208,7 +210,7 @@ class TestRuntimeEdgeCases:
         runtime = Runtime()
         try:
             result = runtime.eval("undefined")
-            assert result == "undefined"
+            assert result is None
         finally:
             runtime.close()
 
@@ -217,7 +219,7 @@ class TestRuntimeEdgeCases:
         runtime = Runtime()
         try:
             result = runtime.eval("null")
-            assert result == "null"
+            assert result is None
         finally:
             runtime.close()
 
@@ -225,8 +227,8 @@ class TestRuntimeEdgeCases:
         """Test evaluation of booleans."""
         runtime = Runtime()
         try:
-            assert runtime.eval("true") == "true"
-            assert runtime.eval("false") == "false"
+            assert runtime.eval("true") is True
+            assert runtime.eval("false") is False
         finally:
             runtime.close()
 
@@ -235,8 +237,8 @@ class TestRuntimeEdgeCases:
         runtime = Runtime()
         try:
             result = runtime.eval("[1, 2, 3]")
-            # Array toString representation
-            assert result == "1,2,3"
+            # Should return native Python list
+            assert result == [1, 2, 3]
         finally:
             runtime.close()
 
@@ -245,8 +247,8 @@ class TestRuntimeEdgeCases:
         runtime = Runtime()
         try:
             result = runtime.eval("({a: 1, b: 2})")
-            # Object toString representation
-            assert "[object Object]" in result
+            # Should return native Python dict
+            assert result == {"a": 1, "b": 2}
         finally:
             runtime.close()
 
@@ -255,8 +257,8 @@ class TestRuntimeEdgeCases:
         runtime = Runtime()
         try:
             result = runtime.eval("")
-            # Empty script returns undefined
-            assert result == "undefined"
+            # Empty script returns undefined -> None
+            assert result is None
         finally:
             runtime.close()
 
@@ -269,14 +271,14 @@ class TestRuntimeAsync:
         """Test async eval with non-promise value."""
         with Runtime() as runtime:
             result = await runtime.eval_async("10 + 20")
-            assert result == "30"
+            assert result == 30
 
     @pytest.mark.asyncio
     async def test_eval_async_with_promise_resolved(self):
         """Test async eval with resolved promise."""
         with Runtime() as runtime:
             result = await runtime.eval_async("Promise.resolve(42)")
-            assert result == "42"
+            assert result == 42
 
     @pytest.mark.asyncio
     async def test_eval_async_with_promise_string(self):
@@ -308,7 +310,7 @@ class TestRuntimeAsync:
                     .then(x => x + 5)
             """
             result = await runtime.eval_async(code)
-            assert result == "25"
+            assert result == 25
 
     @pytest.mark.asyncio
     async def test_eval_async_promise_rejection(self):
@@ -361,7 +363,7 @@ class TestRuntimeTimeout:
         with Runtime() as runtime:
             # Should complete without timeout
             result = await runtime.eval_async("Promise.resolve(123)")
-            assert result == "123"
+            assert result == 123
 
     @pytest.mark.asyncio
     async def test_eval_async_timeout_with_promise_chain(self):
@@ -387,9 +389,9 @@ class TestRuntimeAsyncConcurrency:
             result2 = await runtime.eval_async("Promise.resolve(2)")
             result3 = await runtime.eval_async("Promise.resolve(3)")
 
-            assert result1 == "1"
-            assert result2 == "2"
-            assert result3 == "3"
+            assert result1 == 1
+            assert result2 == 2
+            assert result3 == 3
 
     @pytest.mark.asyncio
     async def test_multiple_runtimes_async(self):
@@ -414,15 +416,15 @@ class TestRuntimeAsyncConcurrency:
         with Runtime() as runtime:
             # Sync eval
             sync_result = runtime.eval("10 + 10")
-            assert sync_result == "20"
+            assert sync_result == 20
 
             # Async eval
             async_result = await runtime.eval_async("Promise.resolve(30)")
-            assert async_result == "30"
+            assert async_result == 30
 
             # Another sync eval to verify state
             final_result = runtime.eval("5 * 5")
-            assert final_result == "25"
+            assert final_result == 25
 
     @pytest.mark.asyncio
     async def test_async_state_persistence(self):
@@ -434,11 +436,11 @@ class TestRuntimeAsyncConcurrency:
             # Multiple async evals modifying state
             await runtime.eval_async("Promise.resolve(++asyncCounter)")
             result = await runtime.eval_async("Promise.resolve(asyncCounter)")
-            assert result == "1"
+            assert result == 1
 
             await runtime.eval_async("Promise.resolve(++asyncCounter)")
             result = runtime.eval("asyncCounter")
-            assert result == "2"
+            assert result == 2
 
 
 class TestRuntimeAsyncErrors:
@@ -541,7 +543,7 @@ class TestRuntimeConfig:
 
         with Runtime(config) as runtime:
             result = runtime.eval("bootstrapped")
-            assert result == "true"
+            assert result is True
 
     def test_runtime_config_without_bootstrap(self):
         """Test Runtime without bootstrap script (should not have bootstrapped variable)."""
@@ -582,6 +584,28 @@ class TestRuntimeConfig:
         assert config4 is not None
         assert len(config4.permissions) == 1
 
+    def test_runtime_config_initial_requires_max(self):
+        """Providing initial heap size without max should raise on runtime creation."""
+        from jsrun import Runtime, RuntimeConfig
+
+        config = RuntimeConfig(initial_heap_size=1 * 1024 * 1024)
+        with pytest.raises(RuntimeError) as exc_info:
+            Runtime(config)
+        message = str(exc_info.value).lower()
+        assert "initial_heap_size" in message and "max_heap_size" in message
+
+    def test_runtime_config_initial_exceeds_max(self):
+        """initial_heap_size greater than max_heap_size should raise."""
+        from jsrun import Runtime, RuntimeConfig
+
+        config = RuntimeConfig(
+            initial_heap_size=8 * 1024 * 1024, max_heap_size=4 * 1024 * 1024
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            Runtime(config)
+        message = str(exc_info.value).lower()
+        assert "cannot exceed" in message
+
     def test_runtime_config_invalid_permission(self):
         """Test RuntimeConfig with invalid permission."""
         from jsrun import RuntimeConfig
@@ -621,6 +645,21 @@ class TestRuntimeConfig:
         with pytest.raises(ValueError, match="Timeout must be a number"):
             config.timeout = "invalid"
 
+    @pytest.mark.asyncio
+    async def test_runtime_config_execution_timeout_applies_to_eval_async(self):
+        """RuntimeConfig.timeout should act as default timeout for eval_async."""
+        from jsrun import Runtime, RuntimeConfig
+
+        config = RuntimeConfig(timeout=0.1)
+        with Runtime(config) as runtime:
+            start = time.monotonic()
+            with pytest.raises(RuntimeError) as exc_info:
+                await runtime.eval_async("new Promise(() => {})")
+            elapsed = time.monotonic() - start
+            assert elapsed < 1.0
+            message = str(exc_info.value).lower()
+            assert "timed out" in message or "pending" in message
+
     def test_runtime_with_config(self):
         """Test Runtime creation with RuntimeConfig."""
         from jsrun import Runtime, RuntimeConfig
@@ -629,7 +668,7 @@ class TestRuntimeConfig:
 
         with Runtime(config) as runtime:
             result = runtime.eval("configured")
-            assert result == "true"
+            assert result is True
 
     def test_runtime_without_config(self):
         """Test Runtime creation without RuntimeConfig (default behavior)."""
@@ -638,7 +677,7 @@ class TestRuntimeConfig:
         # Should work the same as before
         with Runtime() as runtime:
             result = runtime.eval("2 + 2")
-            assert result == "4"
+            assert result == 4
 
     def test_runtime_config_property_chaining(self):
         """Test that RuntimeConfig property setters work correctly."""
@@ -667,7 +706,7 @@ class TestRuntimeConfig:
 
         with Runtime(config1) as runtime1:
             result1 = runtime1.eval("instance1")
-            assert result1 == "true"
+            assert result1 is True
 
             # instance2 should not be defined in runtime1
             result2 = runtime1.eval("typeof instance2")
@@ -675,8 +714,176 @@ class TestRuntimeConfig:
 
         with Runtime(config2) as runtime2:
             result1 = runtime2.eval("instance2")
-            assert result1 == "true"
+            assert result1 is True
 
             # instance1 should not be defined in runtime2
             result2 = runtime2.eval("typeof instance1")
             assert result2 == "undefined"
+
+
+class TestRuntimeNativeTypes:
+    """Tests for native Python type return from eval."""
+
+    @pytest.mark.parametrize(
+        "source, expected",
+        [
+            ("1 + 1", 2),
+            ("'hello world'", "hello world"),
+            ("true", True),
+            ("false", False),
+            ("null", None),
+            ("undefined", None),
+            ("[1, 2, 3]", [1, 2, 3]),
+            ("({foo: 'bar'})", {"foo": "bar"}),
+            ("({nested: {value: 42}})", {"nested": {"value": 42}}),
+            ("3.14", 3.14),
+            ("-5", -5),
+        ],
+    )
+    def test_eval_returns_native(self, source, expected):
+        """Test that eval returns native Python types."""
+        with Runtime() as runtime:
+            result = runtime.eval(source)
+            assert result == expected
+            assert type(result) == type(expected)
+
+    @pytest.mark.parametrize(
+        "source, expected",
+        [
+            ("Promise.resolve(42)", 42),
+            ("Promise.resolve('async result')", "async result"),
+            ("Promise.resolve([1, 2, 3])", [1, 2, 3]),
+            ("Promise.resolve({key: 'value'})", {"key": "value"}),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_eval_async_returns_native(self, source, expected):
+        """Test that eval_async returns native Python types."""
+        with Runtime() as runtime:
+            result = await runtime.eval_async(source)
+            assert result == expected
+            assert type(result) == type(expected)
+
+    def test_eval_function_raises_error(self):
+        """Test that functions raise appropriate errors."""
+        with Runtime() as runtime:
+            with pytest.raises(RuntimeError) as exc_info:
+                runtime.eval("function() { return 42; }")
+            assert "function" in str(exc_info.value).lower()
+
+    def test_eval_circular_reference_raises_error(self):
+        """Test that circular references raise appropriate errors."""
+        with Runtime() as runtime:
+            # Create circular object without returning it (by adding void 0 at the end)
+            runtime.eval("var obj = {}; obj.self = obj; void 0")
+            # Now try to eval the circular object - should raise error
+            with pytest.raises(RuntimeError) as exc_info:
+                runtime.eval("obj")
+            assert (
+                "circular" in str(exc_info.value).lower()
+                or "depth" in str(exc_info.value).lower()
+            )
+
+    def test_eval_bigint_overflow_raises_error(self):
+        """Test that BigInt overflow raises appropriate errors."""
+        with Runtime() as runtime:
+            # Create a BigInt larger than i64::MAX
+            with pytest.raises(RuntimeError) as exc_info:
+                runtime.eval(f"{2**63}n")
+            assert (
+                "overflow" in str(exc_info.value).lower()
+                or "bigint" in str(exc_info.value).lower()
+            )
+
+    def test_eval_nan_infinity_survives(self):
+        """Test that NaN and Infinity survive round-trip."""
+        with Runtime() as runtime:
+            nan_result = runtime.eval("NaN")
+            assert math.isnan(nan_result)
+
+            pos_inf_result = runtime.eval("Infinity")
+            assert pos_inf_result == float("inf")
+
+            neg_inf_result = runtime.eval("-Infinity")
+            assert neg_inf_result == float("-inf")
+
+
+class TestRuntimeOpsNativeTypes:
+    """Test that ops can handle native JavaScript types including NaN/Infinity"""
+
+    def test_sync_op_echo_nan(self):
+        """Test that sync ops can receive and return NaN"""
+
+        def echo(value):
+            return value
+
+        with Runtime() as runtime:
+            runtime.register_op("echo", echo, mode="sync")
+            result = runtime.eval("__host_op_sync__(0, NaN)")
+            assert math.isnan(result), f"Expected NaN but got {result}"
+
+    def test_sync_op_echo_infinity(self):
+        """Test that sync ops can receive and return Infinity"""
+
+        def echo(value):
+            return value
+
+        with Runtime() as runtime:
+            runtime.register_op("echo", echo, mode="sync")
+            result = runtime.eval("__host_op_sync__(0, Infinity)")
+            assert result == float("inf"), f"Expected Infinity but got {result}"
+
+    def test_sync_op_returns_nan_from_python(self):
+        """Test that sync ops can return NaN from Python"""
+
+        def return_nan():
+            return float("nan")
+
+        with Runtime() as runtime:
+            runtime.register_op("returnNaN", return_nan, mode="sync")
+            result = runtime.eval("__host_op_sync__(0)")
+            assert math.isnan(result), f"Expected NaN but got {result}"
+
+    def test_sync_op_python_circular_list_raises_error(self):
+        """Python handlers returning circular lists should raise conversion errors"""
+
+        def make_circular_list():
+            data = []
+            data.append(data)
+            return data
+
+        with Runtime() as runtime:
+            runtime.register_op("makeCircularList", make_circular_list, mode="sync")
+            with pytest.raises(RuntimeError) as exc_info:
+                runtime.eval("__host_op_sync__(0)")
+            message = str(exc_info.value).lower()
+            assert "circular" in message and "list" in message
+
+    def test_sync_op_python_circular_dict_raises_error(self):
+        """Python handlers returning circular dicts should raise conversion errors"""
+
+        def make_circular_dict():
+            data = {}
+            data["self"] = data
+            return data
+
+        with Runtime() as runtime:
+            runtime.register_op("makeCircularDict", make_circular_dict, mode="sync")
+            with pytest.raises(RuntimeError) as exc_info:
+                runtime.eval("__host_op_sync__(0)")
+            message = str(exc_info.value).lower()
+            assert "circular" in message and "dict" in message
+
+    def test_sync_op_python_large_payload_hits_size_limit(self):
+        """Very large Python payloads should trigger size limit errors."""
+
+        def make_large_list():
+            # Approximately 12MB of data (6k strings x 2KB)
+            return ["x" * 2048 for _ in range(6000)]
+
+        with Runtime() as runtime:
+            runtime.register_op("makeLargeList", make_large_list, mode="sync")
+            with pytest.raises(RuntimeError) as exc_info:
+                runtime.eval("__host_op_sync__(0)")
+            message = str(exc_info.value).lower()
+            assert "size" in message or "limit" in message

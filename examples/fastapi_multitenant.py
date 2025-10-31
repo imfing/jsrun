@@ -58,7 +58,7 @@ async def compute_fib(tenant_id: str, n: int):
         }})({n})
     """
     result = runtime.eval(script)
-    return {"tenant": tenant_id, "result": int(result)}
+    return {"tenant": tenant_id, "result": result}
 
 
 if __name__ == "__main__":

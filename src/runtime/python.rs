@@ -1,6 +1,7 @@
 //! Python bindings exposing the runtime to Python callers.
 
 use super::config::RuntimeConfig;
+use super::conversion::js_value_to_python;
 use super::handle::RuntimeHandle;
 use super::ops::PythonOpMode;
 use pyo3::exceptions::PyRuntimeError;
@@ -86,15 +87,21 @@ impl Runtime {
         // Capture task_locals from the current async context
         let task_locals = tokio::get_current_locals(py).ok();
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            handle
+        // Convert the JSValue result to Python after the async operation completes
+        let future = async move {
+            let js_result = handle
                 .eval_async(&code, timeout_ms, task_locals)
                 .await
-                .map_err(|e| PyRuntimeError::new_err(format!("Evaluation failed: {}", e)))
-        })
+                .map_err(|e| PyRuntimeError::new_err(format!("Evaluation failed: {}", e)))?;
+
+            // Convert JSValue to Python in the current Python context
+            Python::attach(|py| js_value_to_python(py, &js_result))
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, future)
     }
 
-    fn eval(&self, py: Python<'_>, code: &str) -> PyResult<String> {
+    fn eval(&self, py: Python<'_>, code: &str) -> PyResult<Py<PyAny>> {
         let handle = self
             .handle
             .borrow()
@@ -102,8 +109,10 @@ impl Runtime {
             .ok_or_else(|| PyRuntimeError::new_err("Runtime has been closed"))?
             .clone();
         let code_owned = code.to_owned();
-        py.detach(|| handle.eval_sync(&code_owned))
-            .map_err(|e| PyRuntimeError::new_err(format!("Evaluation failed: {}", e)))
+        let js_value = py
+            .detach(|| handle.eval_sync(&code_owned))
+            .map_err(|e| PyRuntimeError::new_err(format!("Evaluation failed: {}", e)))?;
+        js_value_to_python(py, &js_value)
     }
 
     fn is_closed(&self) -> bool {
@@ -122,15 +131,6 @@ impl Runtime {
                 .map_err(|e| PyRuntimeError::new_err(format!("Shutdown failed: {}", e)))?;
         }
         Ok(())
-    }
-
-    fn pending_ops(&self) -> PyResult<usize> {
-        Ok(self
-            .handle
-            .borrow()
-            .as_ref()
-            .map(|handle| handle.pending_ops())
-            .unwrap_or(0))
     }
 
     #[pyo3(signature = (name, handler, /, *, mode="sync"))]
@@ -183,7 +183,7 @@ impl Runtime {
         };
 
         let script = format!(
-            "globalThis.{name} = (...args) => {bridge}({op_id}, ...args);",
+            "globalThis.{name} = (...args) => {bridge}({op_id}, ...args); void 0;",
             name = name,
             bridge = bridge_name,
             op_id = op_id

@@ -5,7 +5,8 @@
 //! handlers. Python handlers are registered dynamically at runtime and
 //! identified by an integer op id.
 
-use crate::runtime::conversion::{json_to_python, python_to_json};
+use crate::runtime::conversion::{js_value_to_python, python_to_js_value};
+use crate::runtime::js_value::JSValue;
 use deno_core::ascii_str;
 use deno_core::op2;
 use deno_core::Extension;
@@ -110,8 +111,8 @@ fn map_pyerr(err: PyErr) -> JsErrorBox {
 fn op_jsrun_call_python_sync(
     state: &mut OpState,
     #[smi] op_id: u32,
-    #[serde] args: Vec<serde_json::Value>,
-) -> Result<serde_json::Value, JsErrorBox> {
+    #[serde] args: Vec<JSValue>,
+) -> Result<JSValue, JsErrorBox> {
     let (_registry, entry) = lookup_entry(state, op_id)?;
     if entry.mode != PythonOpMode::Sync {
         return Err(JsErrorBox::type_error(format!(
@@ -120,17 +121,17 @@ fn op_jsrun_call_python_sync(
         )));
     }
 
-    Python::attach(|py| -> Result<serde_json::Value, JsErrorBox> {
+    Python::attach(|py| -> Result<JSValue, JsErrorBox> {
         let py_args = args
             .iter()
-            .map(|arg| json_to_python(py, arg).map_err(map_pyerr))
+            .map(|arg| js_value_to_python(py, arg).map_err(map_pyerr))
             .collect::<Result<Vec<_>, _>>()?;
         let py_args_tuple = PyTuple::new(py, py_args).map_err(map_pyerr)?;
         let result = entry
             .handler
             .call(py, py_args_tuple, None)
             .map_err(map_pyerr)?;
-        python_to_json(result.into_bound(py)).map_err(map_pyerr)
+        python_to_js_value(result.into_bound(py)).map_err(map_pyerr)
     })
 }
 
@@ -139,8 +140,8 @@ fn op_jsrun_call_python_sync(
 fn op_jsrun_call_python_async(
     state: &mut OpState,
     #[smi] op_id: u32,
-    #[serde] args: Vec<serde_json::Value>,
-) -> Result<impl std::future::Future<Output = Result<serde_json::Value, JsErrorBox>>, JsErrorBox> {
+    #[serde] args: Vec<JSValue>,
+) -> Result<impl std::future::Future<Output = Result<JSValue, JsErrorBox>>, JsErrorBox> {
     let (_registry, entry) = lookup_entry(state, op_id)?;
     if entry.mode != PythonOpMode::Async {
         return Err(JsErrorBox::type_error(format!(
@@ -158,7 +159,7 @@ fn op_jsrun_call_python_async(
     let concurrent_future = Python::attach(|py| -> Result<Py<PyAny>, JsErrorBox> {
         let py_args = args
             .iter()
-            .map(|arg| json_to_python(py, arg).map_err(map_pyerr))
+            .map(|arg| js_value_to_python(py, arg).map_err(map_pyerr))
             .collect::<Result<Vec<_>, _>>()?;
         let py_args_tuple = PyTuple::new(py, py_args).map_err(map_pyerr)?;
         let awaitable = entry
@@ -188,10 +189,7 @@ fn op_jsrun_call_python_async(
                 pyo3::intern!(py, "run_coroutine_threadsafe"),
                 (coroutine, event_loop),
             )
-            .map_err(|err| {
-                eprintln!("run_coroutine_threadsafe error: {:?}", err);
-                map_pyerr(err)
-            })?;
+            .map_err(map_pyerr)?;
         Ok(future.unbind())
     })?;
 
@@ -207,7 +205,7 @@ fn op_jsrun_call_python_async(
         .await
         .map_err(|err| JsErrorBox::type_error(err.to_string()))??;
 
-        Python::attach(|py| python_to_json(result.into_bound(py)).map_err(map_pyerr))
+        Python::attach(|py| python_to_js_value(result.into_bound(py)).map_err(map_pyerr))
     })
 }
 

@@ -6,10 +6,8 @@ import types
 from typing import (
     Any,
     Callable,
-    List,
     Optional,
     Self,
-    Tuple,
 )
 
 __all__ = [
@@ -23,8 +21,8 @@ class RuntimeConfig:
     """
     Configuration for JavaScript runtime instances.
 
-    Use this to configure heap limits, execution timeouts, bootstrap scripts,
-    and permissions before creating a Runtime.
+    Use this to configure heap limits, execution timeouts, and bootstrap scripts
+    before creating a Runtime.
     """
 
     def __init__(
@@ -33,7 +31,6 @@ class RuntimeConfig:
         initial_heap_size: Optional[int] = None,
         bootstrap: Optional[str] = None,
         timeout: Optional[float | int] = None,
-        permissions: Optional[List[Tuple[str, Optional[str]]]] = None,
     ) -> None:
         """
         Create a new runtime configuration.
@@ -43,7 +40,6 @@ class RuntimeConfig:
             initial_heap_size: Initial heap size in bytes
             bootstrap: JavaScript source code to execute on startup
             timeout: Execution timeout in seconds (float or int)
-            permissions: List of permission tuples [(kind, scope), ...]
         """
         ...
 
@@ -92,24 +88,6 @@ class RuntimeConfig:
         """
         ...
 
-    @property
-    def permissions(self) -> List[Tuple[str, Optional[str]]]:
-        """List of permission tuples [(kind, scope), ...]."""
-        ...
-
-    @permissions.setter
-    def permissions(self, permissions: List[Tuple[str, Optional[str]]]) -> None:
-        """
-        Set permissions for the runtime.
-
-        Args:
-            permissions: List of permission tuples [(kind, scope), ...]
-
-        Raises:
-            ValueError: If any permission kind is not recognized
-        """
-        ...
-
     def __repr__(self) -> str: ...
 
 class Runtime:
@@ -121,7 +99,7 @@ class Runtime:
     """
 
     def __init__(self, config: Optional[RuntimeConfig] = None) -> None: ...
-    def eval(self, code: str) -> str:
+    def eval(self, code: str) -> Any:
         """
         Evaluate JavaScript code synchronously.
 
@@ -132,7 +110,7 @@ class Runtime:
             code: JavaScript source code to evaluate
 
         Returns:
-            JSON string representation of the result
+            The native Python representation of the result (int, str, dict, list, etc.)
 
         Raises:
             RuntimeError: If evaluation fails or times out
@@ -142,11 +120,11 @@ class Runtime:
             >>> runtime = v8.Runtime()
             >>> result = runtime.eval("1 + 1")
             >>> print(result)
-            "2"
+            2
         """
         ...
 
-    async def eval_async(self, code: str, *, timeout_ms: Optional[int] = None) -> str:
+    async def eval_async(self, code: str, *, timeout_ms: Optional[int] = None) -> Any:
         """
         Evaluate JavaScript code asynchronously.
 
@@ -158,7 +136,7 @@ class Runtime:
             timeout_ms: Optional timeout in milliseconds
 
         Returns:
-            JSON string representation of the result
+            The native Python representation of the result (int, str, dict, list, etc.)
 
         Raises:
             RuntimeError: If evaluation fails
@@ -169,7 +147,7 @@ class Runtime:
             >>> runtime = v8.Runtime()
             >>> result = await runtime.eval_async("Promise.resolve(42)")
             >>> print(result)
-            "42"
+            42
         """
         ...
 
@@ -193,6 +171,13 @@ class Runtime:
 
         Raises:
             RuntimeError: If registration fails
+
+        Note:
+            Async handlers require an active asyncio context. Call
+            :meth:`Runtime.eval_async` (or any other async entry point) at
+            least once before invoking the op from JavaScript; otherwise the
+            runtime will raise an error indicating that the event loop is not
+            running.
 
         Example:
             >>> def add_handler(a, b):
@@ -233,12 +218,19 @@ class Runtime:
             name: Global function name (assigned on `globalThis`)
             handler: Python callable invoked when JS calls the function
 
+        Note:
+            If ``handler`` is async, the runtime must first establish asyncio
+            context via :meth:`Runtime.eval_async` (or another async entry
+            point). Calling an async-bound function from a purely synchronous
+            evaluation without that context will result in an error about the
+            event loop not running.
+
         Example:
             >>> runtime = v8.Runtime()
             >>> def add(a, b): return a + b
             >>> runtime.bind_function("add", add)
             >>> runtime.eval("add(1, 2)")
-            "3"
+            3
         """
         ...
 

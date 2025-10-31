@@ -1,6 +1,7 @@
 //! Python-facing handle for interacting with the runtime thread.
 
 use crate::runtime::config::RuntimeConfig;
+use crate::runtime::js_value::JSValue;
 use crate::runtime::ops::PythonOpMode;
 use crate::runtime::runner::{spawn_runtime_thread, RuntimeCommand};
 use pyo3::prelude::Py;
@@ -36,7 +37,7 @@ impl RuntimeHandle {
             .ok_or_else(|| "Runtime has been shut down".to_string())
     }
 
-    pub fn eval_sync(&self, code: &str) -> Result<String, String> {
+    pub fn eval_sync(&self, code: &str) -> Result<JSValue, String> {
         let sender = self.sender()?.clone();
         let (result_tx, result_rx) = mpsc::channel();
 
@@ -57,7 +58,7 @@ impl RuntimeHandle {
         code: &str,
         timeout_ms: Option<u64>,
         task_locals: Option<TaskLocals>,
-    ) -> Result<String, String> {
+    ) -> Result<JSValue, String> {
         let sender = self.sender()?.clone();
         let (result_tx, result_rx) = oneshot::channel();
 
@@ -98,10 +99,6 @@ impl RuntimeHandle {
             .map_err(|_| "Failed to receive op registration result".to_string())?
     }
 
-    pub fn pending_ops(&self) -> usize {
-        0
-    }
-
     pub fn is_shutdown(&self) -> bool {
         *self.shutdown.lock().unwrap()
     }
@@ -123,8 +120,14 @@ impl RuntimeHandle {
                 return Err("Failed to send shutdown command".to_string());
             }
 
-            let _ = result_rx.recv();
-            *shutdown_guard = true;
+            match result_rx.recv() {
+                Ok(_) => {
+                    *shutdown_guard = true;
+                }
+                Err(_) => {
+                    return Err("Failed to confirm runtime shutdown".to_string());
+                }
+            }
         }
 
         Ok(())

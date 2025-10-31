@@ -287,7 +287,7 @@ class TestBindFunction:
 
             runtime.bind_function("addValues", add)
             result = runtime.eval("addValues(2, 3)")
-            assert result == "5"
+            assert result == 5
         finally:
             runtime.close()
 
@@ -307,7 +307,7 @@ class TestBindFunction:
                 })()
                 """
             )
-            assert result == "12"
+            assert result == 12
 
 
 class TestOpGuarding:
@@ -352,9 +352,9 @@ class TestOpGuarding:
 
             op_id = runtime.register_op("record", record)
             count = runtime.eval("__host_op_sync__({0}, 'a', 'b')".format(op_id))
-            assert count == "1"
+            assert count == 1
             count = runtime.eval("__host_op_sync__({0}, 'c')".format(op_id))
-            assert count == "2"
+            assert count == 2
             assert audit_log == [("a", "b"), ("c",)]
         finally:
             runtime.close()

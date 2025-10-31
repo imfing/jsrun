@@ -7,6 +7,7 @@
 pub mod config;
 pub mod conversion;
 pub mod handle;
+pub mod js_value;
 pub mod ops;
 pub mod python;
 pub mod runner;
@@ -31,7 +32,8 @@ mod tests {
         // Evaluate some code
         let result = handle.eval_sync("40 + 2");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "42");
+        let js_value = result.unwrap();
+        assert!(matches!(js_value, js_value::JSValue::Int(42)));
 
         // Shutdown
         handle.close().unwrap();
@@ -47,7 +49,8 @@ mod tests {
             let code = format!("{} * 2", i);
             let result = handle.eval_sync(&code);
             assert!(result.is_ok());
-            assert_eq!(result.unwrap(), format!("{}", i * 2));
+            let js_value = result.unwrap();
+            assert!(matches!(js_value, js_value::JSValue::Int(val) if val == i * 2));
 
             handle.close().unwrap();
         }
@@ -71,7 +74,9 @@ mod tests {
                 let code = format!("{} + 100", i);
                 let result = handle.eval_sync(&code);
                 assert!(result.is_ok());
-                assert_eq!(result.unwrap(), format!("{}", i + 100));
+                let js_value = result.unwrap();
+                let expected = (i + 100) as i64;
+                assert!(matches!(js_value, js_value::JSValue::Int(val) if val == expected));
             });
             threads.push(t);
         }
@@ -93,7 +98,8 @@ mod tests {
 
         let result = handle.eval_sync("'hello'");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "hello");
+        let js_value = result.unwrap();
+        assert!(matches!(js_value, js_value::JSValue::String(s) if s == "hello"));
     }
 
     #[allow(clippy::field_reassign_with_default)]
@@ -106,7 +112,8 @@ mod tests {
 
         let result = handle.eval_sync("globalThis.VERSION");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "1.0.0");
+        let js_value = result.unwrap();
+        assert!(matches!(js_value, js_value::JSValue::String(s) if s == "1.0.0"));
     }
 
     #[test]
@@ -116,14 +123,14 @@ mod tests {
 
         // Set a variable
         let result1 = handle.eval_sync("var counter = 0; counter");
-        assert_eq!(result1.unwrap(), "0");
+        assert!(matches!(result1.unwrap(), js_value::JSValue::Int(0)));
 
         // Increment it
         let result2 = handle.eval_sync("++counter");
-        assert_eq!(result2.unwrap(), "1");
+        assert!(matches!(result2.unwrap(), js_value::JSValue::Int(1)));
 
         // Verify persistence
         let result3 = handle.eval_sync("counter");
-        assert_eq!(result3.unwrap(), "1");
+        assert!(matches!(result3.unwrap(), js_value::JSValue::Int(1)));
     }
 }
