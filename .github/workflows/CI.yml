@@ -40,11 +40,10 @@ jobs:
           args: --release --out dist --find-interpreter -vv
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
           manylinux: 2_28
-          docker-options: |
-            -e V8_FROM_SOURCE=1
-            -e GN_ARGS=use_pic=true is_component_build=false v8_monolithic=true v8_enable_i18n_support=false
           before-script-linux: |
             set -ex
+            export V8_FROM_SOURCE=1
+            export GN_ARGS='use_pic=true is_component_build=false v8_monolithic=true v8_enable_i18n_support=false'
             if command -v yum > /dev/null 2>&1; then
               yum install -y pkgconfig clang clang-libs llvm-libs
             elif command -v apt-get > /dev/null 2>&1; then
