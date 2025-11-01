@@ -21,21 +21,14 @@ permissions:
 jobs:
   linux:
     runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 60
     strategy:
       matrix:
         platform:
-          - runner: ubuntu-22.04
+          - runner: ubuntu-24.04
             target: x86_64
-          - runner: ubuntu-22.04
-            target: x86
-          - runner: ubuntu-22.04
+          - runner: ubuntu-24.04
             target: aarch64
-          - runner: ubuntu-22.04
-            target: armv7
-          - runner: ubuntu-22.04
-            target: s390x
-          - runner: ubuntu-22.04
-            target: ppc64le
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,14 +36,14 @@ jobs:
           python-version: 3.x
       - name: Build wheels
         uses: PyO3/maturin-action@v1
-        env:
-          V8_FROM_SOURCE: "1"
-          GN_ARGS: "is_component_build=true"
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --find-interpreter
+          args: --release --out dist --find-interpreter -vv
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
-          manylinux: auto
+          manylinux: 2_28
+          docker-options: |
+            -e V8_FROM_SOURCE=1
+            -e GN_ARGS=is_component_build=true
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
@@ -118,14 +111,11 @@ jobs:
           path: dist
 
   macos:
-    if: false
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
         platform:
-          - runner: macos-13
-            target: x86_64
-          - runner: macos-14
+          - runner: macos-15
             target: aarch64
     steps:
       - uses: actions/checkout@v4
@@ -160,9 +150,9 @@ jobs:
           path: dist
 
   release:
+    if: false
     name: Release
     runs-on: ubuntu-latest
-    if: false
     # if: ${{ startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch' }}
     needs: [linux, musllinux, windows, macos, sdist]
     permissions:
