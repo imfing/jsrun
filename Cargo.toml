@@ -20,5 +20,8 @@ serde_json = "1.0"
 tokio = { version = "1.42.0", features = ["rt", "macros", "time", "sync"] }
 indexmap = { version = "2.12.0", features = ["serde"] }
 
+[patch.crates-io]
+v8 = { git = "https://github.com/denoland/rusty_v8.git", tag = "v137.3.0", submodules = true }
+
 [build-dependencies]
 pyo3-build-config = "0.25.1"
