@@ -43,7 +43,7 @@ jobs:
           before-script-linux: |
             set -ex
             export V8_FROM_SOURCE=1
-            export GN_ARGS='use_pic=true is_component_build=false v8_monolithic=true v8_enable_i18n_support=false'
+            export GN_ARGS='use_pic=true is_component_build=false v8_monolithic=true v8_enable_i18n_support=false use_system_icu=false'
             if command -v yum > /dev/null 2>&1; then
               yum install -y pkgconfig clang clang-libs llvm-libs llvm-devel
             elif command -v apt-get > /dev/null 2>&1; then
