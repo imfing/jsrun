@@ -46,7 +46,19 @@ jobs:
             -e GN_ARGS=is_component_build=true
           before-script-linux: |
             set -ex
-            yum install -y pkgconfig
+            if command -v yum > /dev/null 2>&1; then
+              yum install -y pkgconfig
+            elif command -v dnf > /dev/null 2>&1; then
+              dnf install -y pkgconfig
+            elif command -v microdnf > /dev/null 2>&1; then
+              microdnf install -y pkgconfig
+            elif command -v apt-get > /dev/null 2>&1; then
+              apt-get update
+              apt-get install -y pkg-config
+            else
+              echo "No supported package manager found for installing pkg-config" >&2
+              exit 1
+            fi
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
