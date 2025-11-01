@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 jsrun is a Python library providing JavaScript runtime capabilities via Rust and V8. It exposes a Python API for executing JavaScript code in isolated V8 contexts with async support and permission controls.
 
 **Tech Stack:**
-- Rust (core runtime using rusty_v8)
+- Rust (core runtime using deno_core)
 - Python bindings via PyO3
 - Build: Maturin for Python-Rust integration
 - Testing: pytest with pytest-asyncio
@@ -88,6 +88,12 @@ The main Python thread communicates with runtime threads via message passing (`H
 - Multiple isolated JavaScript contexts per runtime
 - Each context has independent global scope but shares the isolate
 - Useful for multi-tenant scenarios
+
+**Module System** (`src/runtime/loader.rs`):
+- Static module registration via `add_static_module()`
+- Custom module resolution and loading
+- Support for both sync and async module evaluation
+- ES module imports/exports
 
 ### V8 Platform Initialization
 
@@ -180,6 +186,52 @@ def my_host_function(args):
 op_id = runtime.register_op("myOp", my_host_function, mode="sync")
 ```
 
+### Module loading with custom resolver and loader
+```python
+import asyncio
+from jsrun import Runtime
+
+async def main():
+    with Runtime() as rt:
+        # Static module
+        rt.add_static_module("math", "export const answer = 42;")
+
+        # Custom resolver and loader
+        def resolver(specifier: str, referrer: str) -> str | None:
+            if specifier.startswith("custom:"):
+                return specifier
+            return None
+
+        async def loader(specifier: str) -> str:
+            if specifier == "custom:message":
+                return "export const text = 'Hello from custom loader';"
+            raise ValueError(f"Unknown module: {specifier}")
+
+        rt.set_module_resolver(resolver)
+        rt.set_module_loader(loader)
+
+        # Evaluate module
+        namespace = await rt.eval_module_async("entry")
+```
+
+### Threading and GIL release
+```python
+import threading
+from jsrun import Runtime
+
+def run_js_in_thread():
+    with Runtime() as rt:
+        # This releases the GIL, allowing other Python threads to run
+        result = rt.eval("Math.sqrt(16)")
+        print(f"JS result: {result}")
+
+# Run JS in parallel with Python threads
+js_thread = threading.Thread(target=run_js_in_thread)
+js_thread.start()
+# Other Python threads can make progress while JS runs
+js_thread.join()
+```
+
 ## File Organization
 
 - `src/lib.rs`: PyO3 module definition, exception types
@@ -190,8 +242,10 @@ op_id = runtime.register_op("myOp", my_host_function, mode="sync")
 - `src/runtime/context.rs`: RuntimeContext for isolated execution
 - `src/runtime/config.rs`: Configuration builder
 - `src/runtime/ops.rs`: Op registry and permissions
+- `src/runtime/loader.rs`: Module loading and resolution
 - `python/jsrun/__init__.py`: Python package entry point
 - `tests/`: Python integration tests
+- `examples/`: Usage examples including threading and modules
 
 ## Common Pitfalls
 
@@ -204,3 +258,7 @@ op_id = runtime.register_op("myOp", my_host_function, mode="sync")
 4. **Op permission mismatches**: Ops requiring permissions will fail if runtime not granted those permissions via `RuntimeConfig`.
 
 5. **Infinite promises**: Using `eval_async` without timeout on never-resolving promises will hang. Always consider timeout_ms for untrusted code.
+
+6. **Module resolution order**: Custom resolver is checked first, then static modules. Return `None` from resolver to fall back to static modules.
+
+7. **GIL release during JS execution**: The runtime properly releases the GIL during JavaScript execution, allowing true parallelism with Python threads.
