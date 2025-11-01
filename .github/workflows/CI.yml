@@ -45,10 +45,10 @@ jobs:
             export V8_FROM_SOURCE=1
             export GN_ARGS='use_pic=true is_component_build=false v8_monolithic=true v8_enable_i18n_support=false'
             if command -v yum > /dev/null 2>&1; then
-              yum install -y pkgconfig clang clang-libs llvm-libs
+              yum install -y pkgconfig clang clang-libs llvm-libs libicu-devel
             elif command -v apt-get > /dev/null 2>&1; then
               apt-get update
-              apt-get install -y clang libclang-dev llvm-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu libc6-dev-arm64-cross libstdc++-12-dev-arm64-cross
+              apt-get install -y clang libclang-dev llvm-dev pkg-config g++-aarch64-linux-gnu gcc-aarch64-linux-gnu libc6-dev-arm64-cross libstdc++-12-dev-arm64-cross libicu-dev
             else
               echo "No supported package manager found for installing pkg-config" >&2
               exit 1
