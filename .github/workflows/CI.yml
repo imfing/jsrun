@@ -46,14 +46,10 @@ jobs:
           before-script-linux: |
             set -ex
             if command -v yum > /dev/null 2>&1; then
-              yum install -y pkgconfig
-            elif command -v dnf > /dev/null 2>&1; then
-              dnf install -y pkgconfig
-            elif command -v microdnf > /dev/null 2>&1; then
-              microdnf install -y pkgconfig
+              yum install -y pkgconfig clang clang-libs llvm-libs
             elif command -v apt-get > /dev/null 2>&1; then
               apt-get update
-              apt-get install -y pkg-config
+              apt-get install -y clang libclang-dev llvm-dev pkg-config
             else
               echo "No supported package manager found for installing pkg-config" >&2
               exit 1
