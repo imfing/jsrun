@@ -1,8 +1,9 @@
 //! Python bindings exposing the runtime to Python callers.
 
 use super::config::RuntimeConfig;
-use super::conversion::js_value_to_python;
+use super::conversion::{js_value_to_python, python_to_js_value};
 use super::handle::RuntimeHandle;
+use super::js_value::JSValue;
 use super::ops::PythonOpMode;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
@@ -55,6 +56,51 @@ impl Runtime {
                 other
             ))),
         }
+    }
+}
+
+fn js_value_to_js_expression(value: &JSValue) -> PyResult<String> {
+    match value {
+        JSValue::Null => Ok("null".to_string()),
+        JSValue::Bool(b) => Ok(b.to_string()),
+        JSValue::Int(i) => Ok(i.to_string()),
+        JSValue::Float(f) => {
+            if f.is_nan() {
+                Ok("Number.NaN".to_string())
+            } else if f.is_infinite() {
+                if f.is_sign_positive() {
+                    Ok("Number.POSITIVE_INFINITY".to_string())
+                } else {
+                    Ok("Number.NEGATIVE_INFINITY".to_string())
+                }
+            } else {
+                Ok(f.to_string())
+            }
+        }
+        JSValue::String(s) => serde_json::to_string(s).map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to serialize string literal: {e}"))
+        }),
+        JSValue::Array(items) => {
+            let mut parts = Vec::with_capacity(items.len());
+            for item in items {
+                parts.push(js_value_to_js_expression(item)?);
+            }
+            Ok(format!("[{}]", parts.join(", ")))
+        }
+        JSValue::Object(map) => {
+            let mut parts = Vec::with_capacity(map.len());
+            for (key, val) in map.iter() {
+                let key_literal = serde_json::to_string(key).map_err(|e| {
+                    PyRuntimeError::new_err(format!("Failed to serialize object key '{key}': {e}"))
+                })?;
+                let expr = js_value_to_js_expression(val)?;
+                parts.push(format!("{key_literal}: {expr}"));
+            }
+            Ok(format!("{{{}}}", parts.join(", ")))
+        }
+        JSValue::Function { .. } => Err(PyRuntimeError::new_err(
+            "Cannot serialize function values; use callables directly",
+        )),
     }
 }
 
@@ -191,6 +237,83 @@ impl Runtime {
         );
 
         // Execute the binding script; ignore the return value ("undefined").
+        let _ = self.eval(py, script.as_str())?;
+        Ok(())
+    }
+
+    #[pyo3(signature = (name, obj))]
+    fn bind_object(&self, py: Python<'_>, name: String, obj: &Bound<'_, PyAny>) -> PyResult<()> {
+        use pyo3::types::PyDict;
+
+        let handle = self
+            .handle
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Runtime has been closed"))?
+            .clone();
+
+        let obj_bound = obj.clone();
+        let dict = obj_bound
+            .cast::<PyDict>()
+            .map_err(|_| PyRuntimeError::new_err("bind_object expects a dict with string keys"))?;
+
+        let mut assignments: Vec<String> = Vec::with_capacity(dict.len());
+
+        for (key, value) in dict.iter() {
+            let key_str: String = key.extract()?;
+            let key_literal = serde_json::to_string(&key_str).map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "Failed to serialize property name '{key_str}': {e}"
+                ))
+            })?;
+
+            if value.is_callable() {
+                let handler_py = value.unbind();
+                let is_async = Self::detect_async(py, &handler_py)?;
+                let mode_enum = if is_async {
+                    PythonOpMode::Async
+                } else {
+                    PythonOpMode::Sync
+                };
+                let op_name = format!("{name}.{key_str}");
+                let op_id = handle
+                    .register_op(op_name, mode_enum, handler_py)
+                    .map_err(|e| {
+                        PyRuntimeError::new_err(format!("Op registration failed: {}", e))
+                    })?;
+
+                let bridge_name = match mode_enum {
+                    PythonOpMode::Sync => "__host_op_sync__",
+                    PythonOpMode::Async => "__host_op_async__",
+                };
+
+                assignments.push(format!(
+                    "target[{key_literal}] = (...args) => {bridge_name}({op_id}, ...args);"
+                ));
+            } else {
+                let js_value = python_to_js_value(value)?;
+                let literal = js_value_to_js_expression(&js_value)?;
+                assignments.push(format!("target[{key_literal}] = {literal};"));
+            }
+        }
+
+        let name_literal = serde_json::to_string(&name).map_err(|e| {
+            PyRuntimeError::new_err(format!("Failed to serialize object name '{name}': {e}"))
+        })?;
+
+        let mut script = String::from("(() => {\n");
+        script.push_str("  const globalName = ");
+        script.push_str(&name_literal);
+        script.push_str(
+            ";\n  const target = globalThis[globalName] ?? (globalThis[globalName] = {});\n",
+        );
+        for assignment in assignments {
+            script.push_str("  ");
+            script.push_str(&assignment);
+            script.push_str("\n");
+        }
+        script.push_str("  return void 0;\n})();");
+
         let _ = self.eval(py, script.as_str())?;
         Ok(())
     }
