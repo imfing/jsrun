@@ -10,15 +10,13 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 @overload
-def _runtime_bind(self: Runtime, func: F, /, *, name: Optional[str] = ...) -> F:
-    ...
+def _runtime_bind(self: Runtime, func: F, /, *, name: Optional[str] = ...) -> F: ...
 
 
 @overload
 def _runtime_bind(
     self: Runtime, func: None = ..., /, *, name: Optional[str] = ...
-) -> Callable[[F], F]:
-    ...
+) -> Callable[[F], F]: ...
 
 
 def _runtime_bind(
@@ -53,4 +51,3 @@ __all__ = [
     "Runtime",
     "RuntimeConfig",
 ]
-

@@ -208,6 +208,7 @@ class TestRuntimeBindings:
     def test_bind_decorator_uses_function_name(self):
         runtime = Runtime()
         try:
+
             @runtime.bind
             def add(a, b):
                 return a + b
@@ -219,6 +220,7 @@ class TestRuntimeBindings:
     def test_bind_decorator_custom_name(self):
         runtime = Runtime()
         try:
+
             @runtime.bind(name="pyAdd")
             def add(a, b):
                 return a + b
@@ -230,6 +232,7 @@ class TestRuntimeBindings:
     def test_bind_direct_call_returns_callable(self):
         runtime = Runtime()
         try:
+
             def multiply(a, b):
                 return a * b
 
@@ -260,6 +263,7 @@ class TestRuntimeBindings:
     async def test_bind_direct_call_supports_async_callables(self):
         runtime = Runtime()
         try:
+
             async def multiply_async(a, b):
                 return a * b
 

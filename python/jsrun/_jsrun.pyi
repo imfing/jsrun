@@ -3,7 +3,7 @@ Type stubs for the jsrun Python extension module.
 """
 
 import types
-from typing import Any, Awaitable, Callable, Optional, Self, TypeVar, overload
+from typing import Any, Awaitable, Callable, Mapping, Optional, Self, TypeVar, overload
 
 __all__ = [
     "Runtime",
@@ -272,6 +272,28 @@ class Runtime:
         self, handler: None = ..., /, *, name: Optional[str] = ...
     ) -> Callable[[F], F]:
         """Return a decorator for binding sync or async callables to ``globalThis``."""
+
+    def bind_object(self, name: str, obj: Mapping[str, Any]) -> None:
+        """
+        Expose a Python mapping as a global JavaScript object.
+
+        Each key/value pair becomes a property on ``globalThis[name]``. Values
+        that are Python callables are bound as callable JavaScript functions,
+        following the same async detection rules as :meth:`bind_function`.
+
+        Args:
+            name: Object name assigned on ``globalThis``
+            obj: Mapping with string keys and JSON-serializable values or
+                callables
+
+        Example:
+            >>> runtime = v8.Runtime()
+            >>> def add(a, b):
+            ...     return a + b
+            >>> runtime.bind_object("api", {"add": add, "value": 42})
+            >>> runtime.eval("api.value")
+            42
+        """
         ...
 
     def set_module_resolver(self, resolver: Callable[[str, str], str | None]) -> None:

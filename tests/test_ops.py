@@ -310,6 +310,43 @@ class TestBindFunction:
             assert result == 12
 
 
+class TestBindObject:
+    """Binding Python objects as JavaScript globals."""
+
+    def test_bind_object_with_values(self):
+        runtime = Runtime()
+        try:
+
+            def add(a, b):
+                return a + b
+
+            runtime.bind_object("api", {"add": add, "value": 123})
+            assert runtime.eval("api.value") == 123
+            assert runtime.eval("api.add(2, 3)") == 5
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_bind_object_with_async_function(self):
+        with Runtime() as runtime:
+
+            async def multiply(a, b):
+                await asyncio.sleep(0)
+                return a * b
+
+            runtime.bind_object("api", {"multiply": multiply, "constant": 7})
+
+            result = await runtime.eval_async(
+                """
+                (async () => {
+                    return [await api.multiply(3, 4), api.constant];
+                })()
+                """
+            )
+
+            assert result == [12, 7]
+
+
 class TestOpGuarding:
     """Demonstrate Python-level permission enforcement."""
 
