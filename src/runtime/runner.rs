@@ -12,7 +12,7 @@ use crate::runtime::ops::{python_extension, PythonOpMode, PythonOpRegistry};
 use crate::runtime::stats::{
     ActivitySummary, HeapSnapshot, RuntimeCallKind, RuntimeStatsSnapshot, RuntimeStatsState,
 };
-use deno_core::error::JsError;
+use deno_core::error::{CoreError, JsError};
 use deno_core::stats::{RuntimeActivityStatsFactory, RuntimeActivityStatsFilter};
 use deno_core::{v8, JsRuntime, PollEventLoopOptions, RuntimeOptions};
 use indexmap::IndexMap;
@@ -24,19 +24,83 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::mpsc::Sender as StdSender;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
-type InitSignalChannel = (StdSender<RuntimeResult<()>>, StdReceiver<RuntimeResult<()>>);
+type InitSignalChannel = (
+    StdSender<RuntimeResult<TerminationController>>,
+    StdReceiver<RuntimeResult<TerminationController>>,
+);
 
 /// Stored function with optional receiver for 'this' binding
 struct StoredFunction {
     function: v8::Global<v8::Function>,
     receiver: Option<v8::Global<v8::Value>>,
+}
+
+const TERMINATION_STATUS_RUNNING: u8 = 0;
+const TERMINATION_STATUS_REQUESTED: u8 = 1;
+const TERMINATION_STATUS_TERMINATED: u8 = 2;
+
+#[derive(Clone)]
+pub struct TerminationController {
+    inner: Arc<TerminationState>,
+}
+
+struct TerminationState {
+    status: AtomicU8,
+    isolate_handle: v8::IsolateHandle,
+}
+
+impl TerminationController {
+    fn new(isolate_handle: v8::IsolateHandle) -> Self {
+        Self {
+            inner: Arc::new(TerminationState {
+                status: AtomicU8::new(TERMINATION_STATUS_RUNNING),
+                isolate_handle,
+            }),
+        }
+    }
+
+    pub fn request(&self) -> bool {
+        self.inner
+            .status
+            .compare_exchange(
+                TERMINATION_STATUS_RUNNING,
+                TERMINATION_STATUS_REQUESTED,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    pub fn terminate_execution(&self) {
+        self.inner.isolate_handle.terminate_execution();
+    }
+
+    pub fn is_requested(&self) -> bool {
+        matches!(
+            self.inner.status.load(Ordering::SeqCst),
+            TERMINATION_STATUS_REQUESTED | TERMINATION_STATUS_TERMINATED
+        )
+    }
+
+    pub fn is_terminated(&self) -> bool {
+        self.inner.status.load(Ordering::SeqCst) == TERMINATION_STATUS_TERMINATED
+    }
+
+    fn mark_terminated(&self) -> bool {
+        self.inner
+            .status
+            .swap(TERMINATION_STATUS_TERMINATED, Ordering::SeqCst)
+            != TERMINATION_STATUS_TERMINATED
+    }
 }
 
 /// Commands sent to the runtime thread.
@@ -94,6 +158,9 @@ pub enum RuntimeCommand {
     GetStats {
         responder: Sender<RuntimeResult<RuntimeStatsSnapshot>>,
     },
+    Terminate {
+        responder: Sender<RuntimeResult<()>>,
+    },
     Shutdown {
         responder: Sender<()>,
     },
@@ -101,7 +168,7 @@ pub enum RuntimeCommand {
 
 pub fn spawn_runtime_thread(
     config: RuntimeConfig,
-) -> RuntimeResult<mpsc::UnboundedSender<RuntimeCommand>> {
+) -> RuntimeResult<(mpsc::UnboundedSender<RuntimeCommand>, TerminationController)> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<RuntimeCommand>();
     let (init_tx, init_rx): InitSignalChannel = std::sync::mpsc::channel();
 
@@ -115,7 +182,8 @@ pub fn spawn_runtime_thread(
 
             let mut core = match RuntimeCore::new(config) {
                 Ok(core) => {
-                    let _ = init_tx.send(Ok(()));
+                    let termination = core.termination_controller();
+                    let _ = init_tx.send(Ok(termination));
                     core
                 }
                 Err(err) => {
@@ -131,7 +199,7 @@ pub fn spawn_runtime_thread(
         .map_err(|e| RuntimeError::internal(format!("Failed to spawn runtime thread: {}", e)))?;
 
     match init_rx.recv() {
-        Ok(Ok(())) => Ok(cmd_tx),
+        Ok(Ok(termination)) => Ok((cmd_tx, termination)),
         Ok(Err(err)) => Err(err),
         Err(_) => Err(RuntimeError::internal(
             "Runtime thread initialization failed",
@@ -148,6 +216,8 @@ struct RuntimeCore {
     fn_registry: Rc<RefCell<HashMap<u32, StoredFunction>>>,
     next_fn_id: Rc<RefCell<u32>>,
     stats_state: RuntimeStatsState,
+    termination: TerminationController,
+    terminated: bool,
 }
 
 impl RuntimeCore {
@@ -199,6 +269,12 @@ impl RuntimeCore {
                 .map_err(|err| RuntimeError::javascript(JsExceptionDetails::from_js_error(*err)))?;
         }
 
+        let termination = {
+            let isolate = js_runtime.v8_isolate();
+            let handle = isolate.thread_safe_handle();
+            TerminationController::new(handle)
+        };
+
         Ok(Self {
             js_runtime,
             registry,
@@ -208,13 +284,24 @@ impl RuntimeCore {
             fn_registry: Rc::new(RefCell::new(HashMap::new())),
             next_fn_id: Rc::new(RefCell::new(0)),
             stats_state: RuntimeStatsState::default(),
+            termination,
+            terminated: false,
         })
+    }
+
+    fn termination_controller(&self) -> TerminationController {
+        self.termination.clone()
     }
 
     async fn run(&mut self, mut rx: mpsc::UnboundedReceiver<RuntimeCommand>) {
         while let Some(cmd) = rx.recv().await {
+            let mut break_loop = false;
             match cmd {
                 RuntimeCommand::Eval { code, responder } => {
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     let result = self.eval_sync(&code);
                     let _ = responder.send(result);
                 }
@@ -224,11 +311,13 @@ impl RuntimeCore {
                     task_locals,
                     responder,
                 } => {
-                    // Update task_locals if provided
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     if let Some(ref locals) = task_locals {
                         self.task_locals = Some(locals.clone());
                         self.module_loader.set_task_locals(locals.clone());
-                        // Update the OpState with the new task_locals
                         self.js_runtime
                             .op_state()
                             .borrow_mut()
@@ -243,10 +332,18 @@ impl RuntimeCore {
                     handler,
                     responder,
                 } => {
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     let result = self.register_python_op(name, mode, handler);
                     let _ = responder.send(result);
                 }
                 RuntimeCommand::SetModuleResolver { handler, responder } => {
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     self.module_loader.set_resolver(handler);
                     if let Some(ref locals) = self.task_locals {
                         self.module_loader.set_task_locals(locals.clone());
@@ -254,6 +351,10 @@ impl RuntimeCore {
                     let _ = responder.send(Ok(()));
                 }
                 RuntimeCommand::SetModuleLoader { handler, responder } => {
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     self.module_loader.set_loader(handler);
                     if let Some(ref locals) = self.task_locals {
                         self.module_loader.set_task_locals(locals.clone());
@@ -265,6 +366,10 @@ impl RuntimeCore {
                     source,
                     responder,
                 } => {
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     self.module_loader.add_static_module(name, source);
                     let _ = responder.send(Ok(()));
                 }
@@ -272,6 +377,10 @@ impl RuntimeCore {
                     specifier,
                     responder,
                 } => {
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     let result = self.eval_module_sync(&specifier);
                     let _ = responder.send(result);
                 }
@@ -281,11 +390,13 @@ impl RuntimeCore {
                     task_locals,
                     responder,
                 } => {
-                    // Update task_locals if provided
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     if let Some(ref locals) = task_locals {
                         self.task_locals = Some(locals.clone());
                         self.module_loader.set_task_locals(locals.clone());
-                        // Update the OpState with the new task_locals
                         self.js_runtime
                             .op_state()
                             .borrow_mut()
@@ -301,6 +412,10 @@ impl RuntimeCore {
                     task_locals,
                     responder,
                 } => {
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     if let Some(ref locals) = task_locals {
                         self.task_locals = Some(locals.clone());
                         self.module_loader.set_task_locals(locals.clone());
@@ -313,12 +428,21 @@ impl RuntimeCore {
                     let _ = responder.send(result);
                 }
                 RuntimeCommand::ReleaseFunction { fn_id, responder } => {
+                    if self.should_reject_new_work() {
+                        let _ = responder.send(Err(RuntimeError::terminated()));
+                        continue;
+                    }
                     let result = self.release_function(fn_id);
                     let _ = responder.send(result);
                 }
                 RuntimeCommand::GetStats { responder } => {
                     let result = self.collect_stats();
                     let _ = responder.send(result);
+                }
+                RuntimeCommand::Terminate { responder } => {
+                    let result = self.finalize_termination();
+                    let _ = responder.send(result);
+                    break_loop = true;
                 }
                 RuntimeCommand::Shutdown { responder } => {
                     let leaked_count = self.fn_registry.borrow().len();
@@ -330,10 +454,75 @@ impl RuntimeCore {
                     }
                     self.fn_registry.borrow_mut().clear();
                     let _ = responder.send(());
-                    break;
+                    break_loop = true;
                 }
             }
+            if break_loop {
+                rx.close();
+                break;
+            }
         }
+    }
+
+    fn should_reject_new_work(&self) -> bool {
+        self.terminated || self.termination.is_requested()
+    }
+
+    fn finalize_termination(&mut self) -> RuntimeResult<()> {
+        if self.terminated {
+            return Ok(());
+        }
+
+        let isolate = self.js_runtime.v8_isolate();
+        // ignore return value; false indicates no termination was pending.
+        let _ = isolate.cancel_terminate_execution();
+
+        self.fn_registry.borrow_mut().clear();
+        self.termination.mark_terminated();
+        self.terminated = true;
+        Ok(())
+    }
+
+    fn translate_js_error(&mut self, err: JsError) -> RuntimeError {
+        let details = JsExceptionDetails::from_js_error(err);
+        if self.should_reject_new_work() && Self::js_error_indicates_termination(&details) {
+            let _ = self.finalize_termination();
+            RuntimeError::terminated()
+        } else {
+            RuntimeError::javascript(details)
+        }
+    }
+
+    fn translate_core_error(&mut self, err: CoreError) -> RuntimeError {
+        let runtime_error = RuntimeError::from(err);
+        if self.should_reject_new_work()
+            && Self::runtime_error_indicates_termination(&runtime_error)
+        {
+            let _ = self.finalize_termination();
+            RuntimeError::terminated()
+        } else {
+            runtime_error
+        }
+    }
+
+    fn runtime_error_indicates_termination(err: &RuntimeError) -> bool {
+        match err {
+            RuntimeError::JavaScript(details) => Self::js_error_indicates_termination(details),
+            RuntimeError::Timeout { context } | RuntimeError::Internal { context } => {
+                context.contains("execution terminated")
+            }
+            RuntimeError::Terminated => true,
+        }
+    }
+
+    fn js_error_indicates_termination(details: &JsExceptionDetails) -> bool {
+        let needle = "execution terminated";
+        details
+            .message
+            .as_deref()
+            .map(|msg| msg.contains(needle))
+            .unwrap_or(false)
+            || details.summary().contains(needle)
     }
 
     fn register_python_op(
@@ -362,7 +551,7 @@ impl RuntimeCore {
             let global_value = this
                 .js_runtime
                 .execute_script("<eval>", code.to_string())
-                .map_err(|err| RuntimeError::javascript(JsExceptionDetails::from_js_error(*err)))?;
+                .map_err(|err| this.translate_js_error(*err))?;
 
             let scope = &mut this.js_runtime.handle_scope();
             let local = deno_core::v8::Local::new(scope, global_value);
@@ -401,7 +590,7 @@ impl RuntimeCore {
         let global_value = self
             .js_runtime
             .execute_script("<eval_async>", code.clone())
-            .map_err(|err| RuntimeError::javascript(JsExceptionDetails::from_js_error(*err)))?;
+            .map_err(|err| self.translate_js_error(*err))?;
 
         let resolve_future = self.js_runtime.resolve(global_value);
         let poll_options = PollEventLoopOptions::default();
@@ -414,12 +603,12 @@ impl RuntimeCore {
             )
             .await
             .map_err(|_| RuntimeError::timeout(format!("Evaluation timed out after {}ms", ms)))?
-            .map_err(RuntimeError::from)?
+            .map_err(|err| self.translate_core_error(err))?
         } else {
             self.js_runtime
                 .with_event_loop_promise(resolve_future, poll_options)
                 .await
-                .map_err(RuntimeError::from)?
+                .map_err(|err| self.translate_core_error(err))?
         };
 
         let scope = &mut self.js_runtime.handle_scope();
@@ -467,14 +656,14 @@ impl RuntimeCore {
             // Poll the runtime until the module evaluation completes
             let poll_options = PollEventLoopOptions::default();
             futures::executor::block_on(this.js_runtime.run_event_loop(poll_options))
-                .map_err(RuntimeError::from)?;
+                .map_err(|err| this.translate_core_error(err))?;
 
             // Wait for the evaluation result - receiver returns Result<(), CoreError>
             let eval_result = futures::executor::block_on(receiver);
 
             // Check if evaluation succeeded
             if let Err(err) = eval_result {
-                return Err(RuntimeError::from(err));
+                return Err(this.translate_core_error(err));
             }
 
             // Get the module namespace - must call get_module_namespace before handle_scope
@@ -561,12 +750,12 @@ impl RuntimeCore {
             .map_err(|_| {
                 RuntimeError::timeout(format!("Module evaluation timed out after {}ms", ms))
             })?
-            .map_err(RuntimeError::from)?
+            .map_err(|err| self.translate_core_error(err))?
         } else {
             self.js_runtime
                 .run_event_loop(poll_options)
                 .await
-                .map_err(RuntimeError::from)?
+                .map_err(|err| self.translate_core_error(err))?
         };
 
         // Wait for the evaluation result - receiver returns Result<(), CoreError>
@@ -574,7 +763,7 @@ impl RuntimeCore {
 
         // Check if evaluation succeeded
         if let Err(err) = eval_result {
-            return Err(RuntimeError::from(err));
+            return Err(self.translate_core_error(err));
         }
 
         // Get the module namespace - must call get_module_namespace before handle_scope
@@ -625,7 +814,10 @@ impl RuntimeCore {
         });
 
         // Look up function in registry and call it
-        let result_global = {
+        let result_global: Result<
+            Result<deno_core::v8::Global<deno_core::v8::Value>, JsError>,
+            RuntimeError,
+        > = {
             let scope = &mut self.js_runtime.handle_scope();
             let mut try_catch = v8::TryCatch::new(scope);
 
@@ -657,22 +849,23 @@ impl RuntimeCore {
             });
 
             // Call the function
-            let result = match func.call(&mut try_catch, call_receiver, &v8_args) {
-                Some(value) => value,
-                None => {
-                    if let Some(exception) = try_catch.exception() {
+            match func.call(&mut try_catch, call_receiver, &v8_args) {
+                Some(value) => Ok(Ok(deno_core::v8::Global::new(&mut try_catch, value))),
+                None => match try_catch.exception() {
+                    Some(exception) => {
                         let js_error = JsError::from_v8_exception(&mut try_catch, exception);
-                        return Err(RuntimeError::javascript(JsExceptionDetails::from_js_error(
-                            *js_error,
-                        )));
+                        Ok(Err(*js_error))
                     }
-                    return Err(RuntimeError::internal("Function call failed"));
-                }
-            };
+                    None => Err(RuntimeError::internal("Function call failed")),
+                },
+            }
+            // scope and try_catch dropped here
+        };
 
-            // Convert to Global for async resolution
-            deno_core::v8::Global::new(&mut try_catch, result)
-            // scope is dropped here
+        let result_global = match result_global {
+            Ok(Ok(global)) => global,
+            Ok(Err(js_error)) => return Err(self.translate_js_error(js_error)),
+            Err(err) => return Err(err),
         };
 
         // Resolve promises (reuse eval_async pattern)
@@ -687,12 +880,12 @@ impl RuntimeCore {
             )
             .await
             .map_err(|_| RuntimeError::timeout(format!("Function call timed out after {}ms", ms)))?
-            .map_err(RuntimeError::from)?
+            .map_err(|err| self.translate_core_error(err))?
         } else {
             self.js_runtime
                 .with_event_loop_promise(resolve_future, poll_options)
                 .await
-                .map_err(RuntimeError::from)?
+                .map_err(|err| self.translate_core_error(err))?
         };
 
         // Convert back to JSValue

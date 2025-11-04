@@ -4,7 +4,7 @@ use crate::runtime::config::RuntimeConfig;
 use crate::runtime::error::{RuntimeError, RuntimeResult};
 use crate::runtime::js_value::JSValue;
 use crate::runtime::ops::PythonOpMode;
-use crate::runtime::runner::{spawn_runtime_thread, RuntimeCommand};
+use crate::runtime::runner::{spawn_runtime_thread, RuntimeCommand, TerminationController};
 use crate::runtime::stats::RuntimeStatsSnapshot;
 use pyo3::prelude::Py;
 use pyo3::PyAny;
@@ -12,6 +12,8 @@ use pyo3_async_runtimes::TaskLocals;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::thread;
+use std::time::Duration;
 use tokio::sync::mpsc as async_mpsc;
 use tokio::sync::oneshot;
 
@@ -19,18 +21,23 @@ use tokio::sync::oneshot;
 pub struct RuntimeHandle {
     tx: Option<async_mpsc::UnboundedSender<RuntimeCommand>>,
     shutdown: Arc<Mutex<bool>>,
+    termination: TerminationController,
 }
 
 impl RuntimeHandle {
     pub fn spawn(config: RuntimeConfig) -> RuntimeResult<Self> {
-        let tx = spawn_runtime_thread(config)?;
+        let (tx, termination) = spawn_runtime_thread(config)?;
         Ok(Self {
             tx: Some(tx),
             shutdown: Arc::new(Mutex::new(false)),
+            termination,
         })
     }
 
     fn sender(&self) -> RuntimeResult<&async_mpsc::UnboundedSender<RuntimeCommand>> {
+        if self.termination.is_requested() || self.termination.is_terminated() {
+            return Err(RuntimeError::terminated());
+        }
         if *self.shutdown.lock().unwrap() {
             return Err(RuntimeError::internal("Runtime has been shut down"));
         }
@@ -252,12 +259,63 @@ impl RuntimeHandle {
     }
 
     pub fn is_shutdown(&self) -> bool {
-        *self.shutdown.lock().unwrap()
+        self.termination.is_requested()
+            || self.termination.is_terminated()
+            || *self.shutdown.lock().unwrap()
+    }
+
+    pub fn terminate(&self) -> RuntimeResult<()> {
+        if self.termination.is_terminated() {
+            return Ok(());
+        }
+
+        let tx = match self.tx.as_ref() {
+            Some(sender) => sender.clone(),
+            None => {
+                *self.shutdown.lock().unwrap() = true;
+                return Ok(());
+            }
+        };
+
+        let first_request = self.termination.request();
+        if !first_request {
+            while !self.termination.is_terminated() {
+                thread::sleep(Duration::from_millis(1));
+            }
+            return Ok(());
+        }
+
+        let (result_tx, result_rx) = mpsc::channel();
+
+        tx.send(RuntimeCommand::Terminate {
+            responder: result_tx,
+        })
+        .map_err(|_| RuntimeError::internal("Failed to send terminate command"))?;
+
+        self.termination.terminate_execution();
+
+        match result_rx.recv() {
+            Ok(result) => {
+                if result.is_ok() {
+                    *self.shutdown.lock().unwrap() = true;
+                }
+                result
+            }
+            Err(_) => Err(RuntimeError::internal(
+                "Failed to receive terminate confirmation",
+            )),
+        }
     }
 
     pub fn close(&mut self) -> RuntimeResult<()> {
         let mut shutdown_guard = self.shutdown.lock().unwrap();
         if *shutdown_guard {
+            return Ok(());
+        }
+
+        if self.termination.is_requested() || self.termination.is_terminated() {
+            self.tx.take();
+            *shutdown_guard = true;
             return Ok(());
         }
 

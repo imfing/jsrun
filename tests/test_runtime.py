@@ -6,12 +6,20 @@ isolates, run sync/async JS, preserve state, enforce shutdown semantics, and
 surface promise/timeouts/errors consistently with the Rust core.
 """
 
+import asyncio
 import math
 import time
 from datetime import datetime, timezone
 
 import pytest
-from jsrun import JavaScriptError, JsUndefined, Runtime, RuntimeStats, undefined
+from jsrun import (
+    JavaScriptError,
+    JsUndefined,
+    Runtime,
+    RuntimeStats,
+    RuntimeTerminated,
+    undefined,
+)
 
 
 class TestRuntimeStats:
@@ -334,6 +342,71 @@ class TestRuntimeContextManager:
 
         # Runtime should still be closed
         assert runtime.is_closed()
+
+
+class TestRuntimeTermination:
+    """Tests for graceful runtime termination."""
+
+    @pytest.mark.asyncio
+    async def test_runtime_terminate_interrupts_execution(self):
+        runtime = Runtime()
+
+        async def kill_runtime():
+            await asyncio.sleep(0.1)
+            runtime.terminate()
+
+        killer = asyncio.create_task(kill_runtime())
+
+        try:
+            with pytest.raises(RuntimeTerminated):
+                await runtime.eval_async("while (true) {}")
+
+            assert runtime.is_closed()
+
+            with pytest.raises(RuntimeTerminated):
+                runtime.eval("1 + 1")
+        finally:
+            await killer
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_runtime_terminate_concurrent_calls(self):
+        runtime = Runtime()
+
+        async def terminate_later(delay: float) -> None:
+            await asyncio.sleep(delay)
+            runtime.terminate()
+
+        async def trigger():
+            await asyncio.gather(
+                terminate_later(0.05),
+                terminate_later(0.06),
+                terminate_later(0.07),
+            )
+
+        killer = asyncio.create_task(trigger())
+
+        try:
+            with pytest.raises(RuntimeTerminated):
+                await runtime.eval_async("while (true) {}")
+
+            await killer
+            assert runtime.is_closed()
+        finally:
+            runtime.close()
+
+    def test_runtime_terminate_idle(self):
+        runtime = Runtime()
+        try:
+            runtime.terminate()
+            assert runtime.is_closed()
+
+            with pytest.raises(RuntimeTerminated):
+                runtime.eval("2 + 2")
+
+            runtime.terminate()  # Idempotent
+        finally:
+            runtime.close()
 
 
 class TestRuntimeConcurrent:

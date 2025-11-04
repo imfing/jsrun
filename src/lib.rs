@@ -16,6 +16,10 @@ fn _jsrun(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "JavaScriptError",
         m.py().get_type::<runtime::python::JavaScriptError>(),
     )?;
+    m.add(
+        "RuntimeTerminated",
+        m.py().get_type::<runtime::python::RuntimeTerminated>(),
+    )?;
     let undefined: Py<PyAny> = runtime::python::get_js_undefined(m.py())?.into();
     m.add("undefined", undefined)?;
     Ok(())

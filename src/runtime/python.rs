@@ -22,6 +22,7 @@ pub struct Runtime {
 static JS_UNDEFINED_SINGLETON: OnceLock<Py<JsUndefined>> = OnceLock::new();
 
 create_exception!(crate::runtime::python, JavaScriptError, PyException);
+create_exception!(crate::runtime::python, RuntimeTerminated, PyRuntimeError);
 
 fn set_optional_attr(py: Python<'_>, value: &Bound<'_, PyAny>, name: &str, attr: Option<String>) {
     match attr {
@@ -84,6 +85,13 @@ fn runtime_error_to_py_with(py: Python<'_>, err: RuntimeError, context: Option<&
                 None => msg,
             };
             PyRuntimeError::new_err(message)
+        }
+        RuntimeError::Terminated => {
+            let message = match context {
+                Some(prefix) if !prefix.is_empty() => format!("{prefix}: Runtime terminated"),
+                _ => "Runtime terminated".to_string(),
+            };
+            PyErr::new::<RuntimeTerminated, _>(message)
         }
     }
 }
@@ -403,6 +411,18 @@ impl Runtime {
                 .map_err(|e| runtime_error_with_context("Shutdown failed", e))?;
         }
         Ok(())
+    }
+
+    fn terminate(&self) -> PyResult<()> {
+        let handle = self.handle.borrow().as_ref().cloned();
+
+        if let Some(handle) = handle {
+            handle
+                .terminate()
+                .map_err(|e| runtime_error_with_context("Termination failed", e))
+        } else {
+            Ok(())
+        }
     }
 
     #[pyo3(signature = (name, handler, /, *, mode="sync"))]

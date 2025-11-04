@@ -22,6 +22,7 @@ __all__ = [
     "RuntimeStats",
     "JsFunction",
     "JsUndefined",
+    "RuntimeTerminated",
     "undefined",
 ]
 
@@ -211,12 +212,21 @@ class JavaScriptError(Exception):
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
 
+class RuntimeTerminated(RuntimeError):
+    """Raised when JavaScript execution is aborted by Runtime.terminate()."""
+
+    def __str__(self) -> str: ...
+    def __repr__(self) -> str: ...
+
 class Runtime:
     """
     Async JavaScript runtime.
 
     Each Runtime runs on a dedicated OS thread with its own V8 isolate
     and provides async-first JavaScript execution with promise support.
+
+    Runtime objects are not thread-safe; all methods must be invoked from
+    the thread that created the runtime while holding the Python GIL.
     """
 
     def __init__(self, config: Optional[RuntimeConfig] = None) -> None: ...
@@ -333,6 +343,15 @@ class Runtime:
         After calling close(), the runtime can no longer be used.
         This method is called automatically when using the runtime
         as a context manager.
+        """
+        ...
+
+    def terminate(self) -> None:
+        """
+        Forcefully stop any running JavaScript and prevent future execution.
+
+        Must be invoked from the same thread that owns the runtime. After
+        termination, subsequent operations raise ``RuntimeTerminated``.
         """
         ...
 
