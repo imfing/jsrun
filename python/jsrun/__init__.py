@@ -10,6 +10,7 @@ from ._jsrun import (
     JsUndefined,
     Runtime,
     RuntimeConfig,
+    RuntimeStats,
     undefined,
 )
 
@@ -60,5 +61,6 @@ __all__ = [
     "JsUndefined",
     "Runtime",
     "RuntimeConfig",
+    "RuntimeStats",
     "undefined",
 ]

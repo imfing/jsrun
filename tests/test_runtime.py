@@ -11,7 +11,112 @@ import time
 from datetime import datetime, timezone
 
 import pytest
-from jsrun import JavaScriptError, JsUndefined, Runtime, undefined
+from jsrun import JavaScriptError, JsUndefined, Runtime, RuntimeStats, undefined
+
+
+class TestRuntimeStats:
+    def test_runtime_stats_initial_values(self):
+        runtime = Runtime()
+        try:
+            stats = runtime.get_stats()
+            assert isinstance(stats, RuntimeStats)
+            assert stats.total_execution_time_ms == 0
+            assert stats.last_execution_time_ms == 0
+            assert stats.last_execution_kind is None
+            assert stats.eval_sync_count == 0
+            assert stats.eval_async_count == 0
+        finally:
+            runtime.close()
+
+    def test_runtime_stats_after_eval(self):
+        runtime = Runtime()
+        try:
+            before = runtime.get_stats()
+            runtime.eval("Array.from({length: 1_000}).reduce((a, b) => a + b, 0)")
+            after_first = runtime.get_stats()
+
+            assert after_first.eval_sync_count == before.eval_sync_count + 1
+            assert after_first.total_execution_time_ms >= before.total_execution_time_ms
+            assert after_first.last_execution_time_ms >= 0
+            assert after_first.last_execution_kind == "eval_sync"
+
+            runtime.eval("Array(10).fill(0).map((_, i) => i).join(',')")
+            after_second = runtime.get_stats()
+
+            assert after_second.eval_sync_count == after_first.eval_sync_count + 1
+            assert (
+                after_second.total_execution_time_ms
+                >= after_first.total_execution_time_ms
+            )
+            assert after_second.last_execution_kind == "eval_sync"
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_runtime_stats_async_paths(self):
+        runtime = Runtime()
+        try:
+            before = runtime.get_stats()
+            await runtime.eval_async("Promise.resolve(123)")
+            after_async = runtime.get_stats()
+
+            assert after_async.eval_async_count == before.eval_async_count + 1
+            assert after_async.total_execution_time_ms >= before.total_execution_time_ms
+
+            js_fn = runtime.eval("(a, b) => a + b")
+            result = await js_fn(4, 6)
+            assert result == 10
+
+            after_call = runtime.get_stats()
+            assert (
+                after_call.call_function_async_count
+                == after_async.call_function_async_count + 1
+            )
+            assert (
+                after_call.total_execution_time_ms
+                >= after_async.total_execution_time_ms
+            )
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_runtime_stats_module_paths(self):
+        runtime_sync = Runtime()
+        try:
+            runtime_sync.add_static_module(
+                "stats_mod",
+                "export const value = 42; export const doubled = value * 2;",
+            )
+
+            before = runtime_sync.get_stats()
+            namespace = runtime_sync.eval_module("stats_mod")
+            assert namespace["value"] == 42
+
+            after_sync = runtime_sync.get_stats()
+            assert (
+                after_sync.eval_module_sync_count == before.eval_module_sync_count + 1
+            )
+        finally:
+            runtime_sync.close()
+
+        runtime_async = Runtime()
+        try:
+            runtime_async.add_static_module(
+                "stats_mod_async",
+                "export const delayed = await Promise.resolve(21);",
+            )
+
+            before_async = runtime_async.get_stats()
+            namespace = await runtime_async.eval_module_async("stats_mod_async")
+            assert namespace["delayed"] == 21
+
+            after_async = runtime_async.get_stats()
+            assert (
+                after_async.eval_module_async_count
+                == before_async.eval_module_async_count + 1
+            )
+        finally:
+            runtime_async.close()
 
 
 class TestRuntimeBasics:

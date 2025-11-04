@@ -9,7 +9,11 @@ use crate::runtime::error::{JsExceptionDetails, RuntimeError, RuntimeResult};
 use crate::runtime::js_value::{JSValue, LimitTracker, MAX_JS_BYTES, MAX_JS_DEPTH};
 use crate::runtime::loader::PythonModuleLoader;
 use crate::runtime::ops::{python_extension, PythonOpMode, PythonOpRegistry};
+use crate::runtime::stats::{
+    ActivitySummary, HeapSnapshot, RuntimeCallKind, RuntimeStatsSnapshot, RuntimeStatsState,
+};
 use deno_core::error::JsError;
+use deno_core::stats::{RuntimeActivityStatsFactory, RuntimeActivityStatsFilter};
 use deno_core::{v8, JsRuntime, PollEventLoopOptions, RuntimeOptions};
 use indexmap::IndexMap;
 use num_bigint::{BigInt, Sign};
@@ -23,7 +27,7 @@ use std::rc::Rc;
 use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::mpsc::Sender as StdSender;
 use std::sync::mpsc::Sender;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -87,6 +91,9 @@ pub enum RuntimeCommand {
         fn_id: u32,
         responder: oneshot::Sender<RuntimeResult<()>>,
     },
+    GetStats {
+        responder: Sender<RuntimeResult<RuntimeStatsSnapshot>>,
+    },
     Shutdown {
         responder: Sender<()>,
     },
@@ -140,6 +147,7 @@ struct RuntimeCore {
     execution_timeout: Option<Duration>,
     fn_registry: Rc<RefCell<HashMap<u32, StoredFunction>>>,
     next_fn_id: Rc<RefCell<u32>>,
+    stats_state: RuntimeStatsState,
 }
 
 impl RuntimeCore {
@@ -199,6 +207,7 @@ impl RuntimeCore {
             execution_timeout,
             fn_registry: Rc::new(RefCell::new(HashMap::new())),
             next_fn_id: Rc::new(RefCell::new(0)),
+            stats_state: RuntimeStatsState::default(),
         })
     }
 
@@ -307,6 +316,10 @@ impl RuntimeCore {
                     let result = self.release_function(fn_id);
                     let _ = responder.send(result);
                 }
+                RuntimeCommand::GetStats { responder } => {
+                    let result = self.collect_stats();
+                    let _ = responder.send(result);
+                }
                 RuntimeCommand::Shutdown { responder } => {
                     let leaked_count = self.fn_registry.borrow().len();
                     if leaked_count > 0 {
@@ -332,18 +345,44 @@ impl RuntimeCore {
         Ok(self.registry.register(name, mode, handler))
     }
 
-    fn eval_sync(&mut self, code: &str) -> RuntimeResult<JSValue> {
-        let global_value = self
-            .js_runtime
-            .execute_script("<eval>", code.to_string())
-            .map_err(|err| RuntimeError::javascript(JsExceptionDetails::from_js_error(*err)))?;
+    /// Measure the duration of a synchronous entry point, including error paths.
+    fn with_timing<T, F>(&mut self, kind: RuntimeCallKind, f: F) -> RuntimeResult<T>
+    where
+        F: FnOnce(&mut Self) -> RuntimeResult<T>,
+    {
+        let start = Instant::now();
+        let result = f(self);
+        let elapsed = start.elapsed();
+        self.stats_state.record(kind, elapsed);
+        result
+    }
 
-        let scope = &mut self.js_runtime.handle_scope();
-        let local = deno_core::v8::Local::new(scope, global_value);
-        Self::value_to_js_value(&self.fn_registry, &self.next_fn_id, scope, local)
+    fn eval_sync(&mut self, code: &str) -> RuntimeResult<JSValue> {
+        self.with_timing(RuntimeCallKind::EvalSync, |this| {
+            let global_value = this
+                .js_runtime
+                .execute_script("<eval>", code.to_string())
+                .map_err(|err| RuntimeError::javascript(JsExceptionDetails::from_js_error(*err)))?;
+
+            let scope = &mut this.js_runtime.handle_scope();
+            let local = deno_core::v8::Local::new(scope, global_value);
+            Self::value_to_js_value(&this.fn_registry, &this.next_fn_id, scope, local)
+        })
     }
 
     async fn eval_async(
+        &mut self,
+        code: String,
+        timeout_ms: Option<u64>,
+    ) -> RuntimeResult<JSValue> {
+        let start = Instant::now();
+        let result = self.eval_async_inner(code, timeout_ms).await;
+        let elapsed = start.elapsed();
+        self.stats_state.record(RuntimeCallKind::EvalAsync, elapsed);
+        result
+    }
+
+    async fn eval_async_inner(
         &mut self,
         code: String,
         timeout_ms: Option<u64>,
@@ -389,60 +428,82 @@ impl RuntimeCore {
     }
 
     fn eval_module_sync(&mut self, specifier: &str) -> RuntimeResult<JSValue> {
-        // Try to parse as absolute URL first, if it fails, resolve it as a bare specifier
-        let module_specifier = if specifier.contains(':') || specifier.starts_with('/') {
-            // Already a URL or absolute path
-            deno_core::ModuleSpecifier::parse(specifier).map_err(|e| {
-                RuntimeError::internal(format!("Invalid module specifier '{}': {}", specifier, e))
-            })?
-        } else {
-            // Bare specifier - resolve relative to a synthetic base
-            let base = deno_core::ModuleSpecifier::parse("jsrun://runtime/")
-                .map_err(|e| RuntimeError::internal(format!("Failed to create base URL: {}", e)))?;
-            base.join(specifier).map_err(|e| {
-                RuntimeError::internal(format!(
-                    "Failed to resolve module specifier '{}': {}",
-                    specifier, e
-                ))
-            })?
-        };
-
-        // Load the module
-        let module_id =
-            futures::executor::block_on(self.js_runtime.load_main_es_module(&module_specifier))
-                .map_err(|e| {
-                    RuntimeError::internal(format!("Failed to load module '{}': {}", specifier, e))
+        self.with_timing(RuntimeCallKind::EvalModuleSync, |this| {
+            // Try to parse as absolute URL first, if it fails, resolve it as a bare specifier
+            let module_specifier = if specifier.contains(':') || specifier.starts_with('/') {
+                // Already a URL or absolute path
+                deno_core::ModuleSpecifier::parse(specifier).map_err(|e| {
+                    RuntimeError::internal(format!(
+                        "Invalid module specifier '{}': {}",
+                        specifier, e
+                    ))
+                })?
+            } else {
+                // Bare specifier - resolve relative to a synthetic base
+                let base = deno_core::ModuleSpecifier::parse("jsrun://runtime/").map_err(|e| {
+                    RuntimeError::internal(format!("Failed to create base URL: {}", e))
                 })?;
+                base.join(specifier).map_err(|e| {
+                    RuntimeError::internal(format!(
+                        "Failed to resolve module specifier '{}': {}",
+                        specifier, e
+                    ))
+                })?
+            };
 
-        // Evaluate the module
-        let receiver = self.js_runtime.mod_evaluate(module_id);
+            // Load the module
+            let module_id =
+                futures::executor::block_on(this.js_runtime.load_main_es_module(&module_specifier))
+                    .map_err(|e| {
+                        RuntimeError::internal(format!(
+                            "Failed to load module '{}': {}",
+                            specifier, e
+                        ))
+                    })?;
 
-        // Poll the runtime until the module evaluation completes
-        let poll_options = PollEventLoopOptions::default();
-        futures::executor::block_on(self.js_runtime.run_event_loop(poll_options))
-            .map_err(RuntimeError::from)?;
+            // Evaluate the module
+            let receiver = this.js_runtime.mod_evaluate(module_id);
 
-        // Wait for the evaluation result - receiver returns Result<(), CoreError>
-        let eval_result = futures::executor::block_on(receiver);
+            // Poll the runtime until the module evaluation completes
+            let poll_options = PollEventLoopOptions::default();
+            futures::executor::block_on(this.js_runtime.run_event_loop(poll_options))
+                .map_err(RuntimeError::from)?;
 
-        // Check if evaluation succeeded
-        if let Err(err) = eval_result {
-            return Err(RuntimeError::from(err));
-        }
+            // Wait for the evaluation result - receiver returns Result<(), CoreError>
+            let eval_result = futures::executor::block_on(receiver);
 
-        // Get the module namespace - must call get_module_namespace before handle_scope
-        let module_namespace = self
-            .js_runtime
-            .get_module_namespace(module_id)
-            .map_err(|e| {
-                RuntimeError::internal(format!("Failed to get module namespace: {}", e))
-            })?;
-        let scope = &mut self.js_runtime.handle_scope();
-        let local = deno_core::v8::Local::new(scope, module_namespace);
-        Self::value_to_js_value(&self.fn_registry, &self.next_fn_id, scope, local.into())
+            // Check if evaluation succeeded
+            if let Err(err) = eval_result {
+                return Err(RuntimeError::from(err));
+            }
+
+            // Get the module namespace - must call get_module_namespace before handle_scope
+            let module_namespace =
+                this.js_runtime
+                    .get_module_namespace(module_id)
+                    .map_err(|e| {
+                        RuntimeError::internal(format!("Failed to get module namespace: {}", e))
+                    })?;
+            let scope = &mut this.js_runtime.handle_scope();
+            let local = deno_core::v8::Local::new(scope, module_namespace);
+            Self::value_to_js_value(&this.fn_registry, &this.next_fn_id, scope, local.into())
+        })
     }
 
     async fn eval_module_async(
+        &mut self,
+        specifier: String,
+        timeout_ms: Option<u64>,
+    ) -> RuntimeResult<JSValue> {
+        let start = Instant::now();
+        let result = self.eval_module_async_inner(specifier, timeout_ms).await;
+        let elapsed = start.elapsed();
+        self.stats_state
+            .record(RuntimeCallKind::EvalModuleAsync, elapsed);
+        result
+    }
+
+    async fn eval_module_async_inner(
         &mut self,
         specifier: String,
         timeout_ms: Option<u64>,
@@ -530,6 +591,22 @@ impl RuntimeCore {
 
     /// Execute a stored JavaScript function by id with the provided arguments.
     async fn call_function_async(
+        &mut self,
+        fn_id: u32,
+        args: Vec<JSValue>,
+        timeout_ms: Option<u64>,
+    ) -> RuntimeResult<JSValue> {
+        let start = Instant::now();
+        let result = self
+            .call_function_async_inner(fn_id, args, timeout_ms)
+            .await;
+        let elapsed = start.elapsed();
+        self.stats_state
+            .record(RuntimeCallKind::CallFunctionAsync, elapsed);
+        result
+    }
+
+    async fn call_function_async_inner(
         &mut self,
         fn_id: u32,
         args: Vec<JSValue>,
@@ -631,6 +708,31 @@ impl RuntimeCore {
             .remove(&fn_id)
             .ok_or_else(|| RuntimeError::internal(format!("Function ID {} not found", fn_id)))?;
         Ok(())
+    }
+
+    fn collect_stats(&mut self) -> RuntimeResult<RuntimeStatsSnapshot> {
+        let heap = self.snapshot_memory_usage();
+        let execution = self.stats_state.snapshot();
+        let activity = self.snapshot_activity();
+        Ok(RuntimeStatsSnapshot::new(heap, execution, activity))
+    }
+
+    /// Snapshot V8 heap statistics. `get_heap_statistics` is safe here because it only reads isolate state.
+    fn snapshot_memory_usage(&mut self) -> HeapSnapshot {
+        let stats = self.js_runtime.v8_isolate().get_heap_statistics();
+        HeapSnapshot {
+            heap_total_bytes: stats.total_heap_size() as u64,
+            heap_used_bytes: stats.used_heap_size() as u64,
+            external_memory_bytes: stats.external_memory() as u64,
+            physical_total_bytes: stats.total_physical_size() as u64,
+        }
+    }
+
+    fn snapshot_activity(&self) -> ActivitySummary {
+        let factory: RuntimeActivityStatsFactory = self.js_runtime.runtime_activity_stats_factory();
+        let filter = RuntimeActivityStatsFilter::all();
+        let snapshot = factory.capture(&filter).dump();
+        ActivitySummary::from_snapshot(snapshot)
     }
 
     /// Convert a V8 value to JSValue with circular reference detection and limits enforced.

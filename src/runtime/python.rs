@@ -6,6 +6,7 @@ use super::error::{JsExceptionDetails, RuntimeError};
 use super::handle::RuntimeHandle;
 use super::js_value::JSValue;
 use super::ops::PythonOpMode;
+use super::stats::{RuntimeCallKind, RuntimeStatsSnapshot};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError};
 use pyo3::prelude::*;
@@ -128,6 +129,85 @@ pub(crate) fn get_js_undefined(py: Python<'_>) -> PyResult<Py<JsUndefined>> {
         let stored = value.clone_ref(py);
         let _ = JS_UNDEFINED_SINGLETON.set(stored);
         Ok(value)
+    }
+}
+
+#[pyclass(module = "_jsrun")]
+pub struct RuntimeStats {
+    #[pyo3(get)]
+    heap_total_bytes: u64,
+    #[pyo3(get)]
+    heap_used_bytes: u64,
+    #[pyo3(get)]
+    external_memory_bytes: u64,
+    #[pyo3(get)]
+    physical_total_bytes: u64,
+    #[pyo3(get)]
+    total_execution_time_ms: u64,
+    #[pyo3(get)]
+    last_execution_time_ms: u64,
+    #[pyo3(get)]
+    last_execution_kind: Option<String>,
+    #[pyo3(get)]
+    eval_sync_count: u64,
+    #[pyo3(get)]
+    eval_async_count: u64,
+    #[pyo3(get)]
+    eval_module_sync_count: u64,
+    #[pyo3(get)]
+    eval_module_async_count: u64,
+    #[pyo3(get)]
+    call_function_async_count: u64,
+    #[pyo3(get)]
+    active_async_ops: u64,
+    #[pyo3(get)]
+    open_resources: u64,
+    #[pyo3(get)]
+    active_timers: u64,
+    #[pyo3(get)]
+    active_intervals: u64,
+}
+
+impl RuntimeStats {
+    fn from_snapshot(snapshot: RuntimeStatsSnapshot) -> Self {
+        RuntimeStats {
+            heap_total_bytes: snapshot.heap_total_bytes,
+            heap_used_bytes: snapshot.heap_used_bytes,
+            external_memory_bytes: snapshot.external_memory_bytes,
+            physical_total_bytes: snapshot.physical_total_bytes,
+            total_execution_time_ms: snapshot.total_execution_time_ms,
+            last_execution_time_ms: snapshot.last_execution_time_ms,
+            last_execution_kind: snapshot
+                .last_execution_kind
+                .map(|kind: RuntimeCallKind| kind.as_str().to_string()),
+            eval_sync_count: snapshot.eval_sync_count,
+            eval_async_count: snapshot.eval_async_count,
+            eval_module_sync_count: snapshot.eval_module_sync_count,
+            eval_module_async_count: snapshot.eval_module_async_count,
+            call_function_async_count: snapshot.call_function_async_count,
+            active_async_ops: snapshot.active_async_ops,
+            open_resources: snapshot.open_resources,
+            active_timers: snapshot.active_timers,
+            active_intervals: snapshot.active_intervals,
+        }
+    }
+}
+
+#[pymethods]
+impl RuntimeStats {
+    fn __repr__(&self) -> String {
+        format!(
+            "RuntimeStats(heap_used_bytes={}, total_execution_time_ms={}, last_execution_kind={}, active_async_ops={}, open_resources={}, eval_sync_count={}, call_function_async_count={})",
+            self.heap_used_bytes,
+            self.total_execution_time_ms,
+            self.last_execution_kind
+                .as_deref()
+                .unwrap_or("None"),
+            self.active_async_ops,
+            self.open_resources,
+            self.eval_sync_count,
+            self.call_function_async_count
+        )
     }
 }
 
@@ -300,6 +380,19 @@ impl Runtime {
             .as_ref()
             .map(|handle| handle.is_shutdown())
             .unwrap_or(true)
+    }
+
+    fn get_stats(&self, py: Python<'_>) -> PyResult<RuntimeStats> {
+        let handle = self
+            .handle
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Runtime has been closed"))?
+            .clone();
+        let snapshot = py
+            .detach(|| handle.get_stats())
+            .map_err(|e| runtime_error_with_context("Failed to obtain runtime stats", e))?;
+        Ok(RuntimeStats::from_snapshot(snapshot))
     }
 
     fn close(&self) -> PyResult<()> {

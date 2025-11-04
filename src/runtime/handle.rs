@@ -5,6 +5,7 @@ use crate::runtime::error::{RuntimeError, RuntimeResult};
 use crate::runtime::js_value::JSValue;
 use crate::runtime::ops::PythonOpMode;
 use crate::runtime::runner::{spawn_runtime_thread, RuntimeCommand};
+use crate::runtime::stats::RuntimeStatsSnapshot;
 use pyo3::prelude::Py;
 use pyo3::PyAny;
 use pyo3_async_runtimes::TaskLocals;
@@ -233,6 +234,21 @@ impl RuntimeHandle {
         result_rx
             .await
             .map_err(|_| RuntimeError::internal("Failed to receive release result"))?
+    }
+
+    pub fn get_stats(&self) -> RuntimeResult<RuntimeStatsSnapshot> {
+        let sender = self.sender()?.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        sender
+            .send(RuntimeCommand::GetStats {
+                responder: result_tx,
+            })
+            .map_err(|_| RuntimeError::internal("Failed to send get_stats command"))?;
+
+        result_rx
+            .recv()
+            .map_err(|_| RuntimeError::internal("Failed to receive stats result"))?
     }
 
     pub fn is_shutdown(&self) -> bool {

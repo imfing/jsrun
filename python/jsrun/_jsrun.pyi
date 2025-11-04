@@ -19,6 +19,7 @@ __all__ = [
     "JavaScriptError",
     "Runtime",
     "RuntimeConfig",
+    "RuntimeStats",
     "JsFunction",
     "JsUndefined",
     "undefined",
@@ -98,6 +99,34 @@ class RuntimeConfig:
             timeout: Timeout in seconds (float or int)
         """
         ...
+
+    def __repr__(self) -> str: ...
+
+class RuntimeStats:
+    """
+    Structured snapshot of runtime resource usage and execution counters.
+
+    Instances are returned from :meth:`Runtime.get_stats` and provide
+    read-only insight into the V8 heap, total execution time, and active
+    resources currently managed by the runtime.
+    """
+
+    heap_total_bytes: int
+    heap_used_bytes: int
+    external_memory_bytes: int
+    physical_total_bytes: int
+    total_execution_time_ms: int
+    last_execution_time_ms: int
+    last_execution_kind: str | None
+    eval_sync_count: int
+    eval_async_count: int
+    eval_module_sync_count: int
+    eval_module_async_count: int
+    call_function_async_count: int
+    active_async_ops: int
+    open_resources: int
+    active_timers: int
+    active_intervals: int
 
     def __repr__(self) -> str: ...
 
@@ -285,6 +314,15 @@ class Runtime:
 
         Returns:
             True if the runtime is closed, False otherwise
+        """
+        ...
+
+    def get_stats(self) -> RuntimeStats:
+        """
+        Capture a snapshot of runtime resource usage and execution counters.
+
+        Returns:
+            RuntimeStats: Structured metrics describing the runtime state.
         """
         ...
 
