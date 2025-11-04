@@ -3,13 +3,15 @@ Type stubs for the jsrun Python extension module.
 """
 
 import types
-from typing import Any, Awaitable, Callable, Optional, Self
+from typing import Any, Awaitable, Callable, Optional, Self, TypeVar, overload
 
 __all__ = [
     "Runtime",
     "RuntimeConfig",
     "JsFunction",
 ]
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 # Core runtime types
 
@@ -258,6 +260,18 @@ class Runtime:
             >>> runtime.eval("add(1, 2)")
             3
         """
+        ...
+
+    @overload
+    def bind(self, handler: F, /, *, name: Optional[str] = ...) -> F:
+        """Bind a synchronous or asynchronous callable to ``globalThis``."""
+        ...
+
+    @overload
+    def bind(
+        self, handler: None = ..., /, *, name: Optional[str] = ...
+    ) -> Callable[[F], F]:
+        """Return a decorator for binding sync or async callables to ``globalThis``."""
         ...
 
     def set_module_resolver(self, resolver: Callable[[str, str], str | None]) -> None:

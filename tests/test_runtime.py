@@ -202,6 +202,76 @@ class TestRuntimeConcurrent:
                 runtime.close()
 
 
+class TestRuntimeBindings:
+    """Tests for the decorator-style binding helper."""
+
+    def test_bind_decorator_uses_function_name(self):
+        runtime = Runtime()
+        try:
+            @runtime.bind
+            def add(a, b):
+                return a + b
+
+            assert runtime.eval("add(2, 3)") == 5
+        finally:
+            runtime.close()
+
+    def test_bind_decorator_custom_name(self):
+        runtime = Runtime()
+        try:
+            @runtime.bind(name="pyAdd")
+            def add(a, b):
+                return a + b
+
+            assert runtime.eval("pyAdd(4, 6)") == 10
+        finally:
+            runtime.close()
+
+    def test_bind_direct_call_returns_callable(self):
+        runtime = Runtime()
+        try:
+            def multiply(a, b):
+                return a * b
+
+            bound = runtime.bind(multiply)
+            assert bound is multiply
+            assert runtime.eval("multiply(3, 4)") == 12
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_bind_decorator_supports_async_callables(self):
+        runtime = Runtime()
+        try:
+            calls = []
+
+            @runtime.bind
+            async def add_async(a, b):
+                calls.append((a, b))
+                return a + b
+
+            result = await runtime.eval_async("add_async(5, 7)")
+            assert result == 12
+            assert calls == [(5, 7)]
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_bind_direct_call_supports_async_callables(self):
+        runtime = Runtime()
+        try:
+            async def multiply_async(a, b):
+                return a * b
+
+            bound = runtime.bind(multiply_async, name="pyMultiplyAsync")
+            assert bound is multiply_async
+
+            result = await runtime.eval_async("pyMultiplyAsync(3, 9)")
+            assert result == 27
+        finally:
+            runtime.close()
+
+
 class TestRuntimeEdgeCases:
     """Edge case tests for runtime behavior."""
 
