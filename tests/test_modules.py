@@ -3,7 +3,7 @@ Tests for JavaScript module loading and evaluation.
 """
 
 import pytest
-from jsrun import Runtime
+from jsrun import Runtime, RuntimeConfig
 
 
 class TestModuleStaticLoading:
@@ -163,6 +163,21 @@ class TestModuleEvaluation:
             result = rt.eval_module("test")
             # Module namespace should be returned
             assert result is not None
+
+    def test_eval_module_sync_timeout(self):
+        """Sync module evaluation should respect RuntimeConfig timeout."""
+        config = RuntimeConfig(timeout=0.05)
+        with Runtime(config) as rt:
+            rt.add_static_module(
+                "loop",
+                """
+                while (true) {}
+                export const value = 1;
+                """,
+            )
+            with pytest.raises(RuntimeError) as exc_info:
+                rt.eval_module("loop")
+            assert "timed out" in str(exc_info.value)
 
     @pytest.mark.asyncio
     async def test_eval_module_async(self):

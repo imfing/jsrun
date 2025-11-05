@@ -16,6 +16,7 @@ from jsrun import (
     JavaScriptError,
     JsUndefined,
     Runtime,
+    RuntimeConfig,
     RuntimeStats,
     RuntimeTerminated,
     undefined,
@@ -744,6 +745,73 @@ class TestRuntimeAsync:
 
 class TestRuntimeTimeout:
     """Test timeout functionality."""
+
+    def test_eval_sync_timeout(self):
+        """Sync eval should respect RuntimeConfig timeout."""
+        config = RuntimeConfig(timeout=0.05)
+        with Runtime(config) as runtime:
+            with pytest.raises(RuntimeError) as exc_info:
+                runtime.eval("while (true) {}")
+            assert "timed out" in str(exc_info.value)
+
+    def test_eval_sync_completes_before_timeout(self):
+        """Operations that complete quickly should not timeout."""
+        config = RuntimeConfig(timeout=1.0)
+        with Runtime(config) as runtime:
+            result = runtime.eval("2 + 2")
+            assert result == 4
+
+    def test_eval_sync_error_before_timeout(self):
+        """Errors should be preserved when they occur before timeout."""
+        config = RuntimeConfig(timeout=1.0)
+        with Runtime(config) as runtime:
+            with pytest.raises(JavaScriptError) as exc_info:
+                runtime.eval("throw new Error('immediate error')")
+            assert "immediate error" in str(exc_info.value)
+            assert "timed out" not in str(exc_info.value)
+
+    def test_concurrent_sync_operations_different_timeouts(self):
+        """Multiple runtimes with different timeouts should work concurrently."""
+        import threading
+
+        results = {}
+        errors = {}
+
+        def run_with_timeout(name: str, timeout: float, code: str):
+            try:
+                config = RuntimeConfig(timeout=timeout)
+                with Runtime(config) as rt:
+                    results[name] = rt.eval(code)
+            except Exception as e:
+                errors[name] = str(e)
+
+        # Fast operation with short timeout
+        t1 = threading.Thread(target=run_with_timeout, args=("fast", 1.0, "42"))
+        # Slow operation with long timeout
+        t2 = threading.Thread(
+            target=run_with_timeout,
+            args=(
+                "slow",
+                1.0,
+                "let sum = 0; for(let i = 0; i < 10000000; i++) sum += i; sum",
+            ),
+        )
+        # Infinite loop with short timeout
+        t3 = threading.Thread(
+            target=run_with_timeout, args=("timeout", 0.05, "while(true) {}")
+        )
+
+        t1.start()
+        t2.start()
+        t3.start()
+        t1.join()
+        t2.join()
+        t3.join()
+
+        assert results.get("fast") == 42
+        assert "slow" in results or "slow" in errors  # May complete or timeout
+        assert "timeout" in errors
+        assert "timed out" in errors["timeout"]
 
     @pytest.mark.asyncio
     async def test_eval_async_timeout_success(self):

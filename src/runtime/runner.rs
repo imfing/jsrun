@@ -24,11 +24,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::mpsc::Sender as StdSender;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -56,6 +57,13 @@ pub struct TerminationController {
 struct TerminationState {
     status: AtomicU8,
     isolate_handle: v8::IsolateHandle,
+}
+
+struct SyncWatchdog {
+    handle: thread::JoinHandle<()>,
+    fired: Arc<AtomicBool>,
+    cancel_flag: Arc<AtomicBool>,
+    duration: Duration,
 }
 
 impl TerminationController {
@@ -302,7 +310,15 @@ impl RuntimeCore {
                         let _ = responder.send(Err(RuntimeError::terminated()));
                         continue;
                     }
+                    let watchdog = match self.start_sync_watchdog() {
+                        Ok(watchdog) => watchdog,
+                        Err(err) => {
+                            let _ = responder.send(Err(err));
+                            continue;
+                        }
+                    };
                     let result = self.eval_sync(&code);
+                    let result = self.apply_watchdog_result(result, watchdog, "Sync evaluation");
                     let _ = responder.send(result);
                 }
                 RuntimeCommand::EvalAsync {
@@ -381,7 +397,16 @@ impl RuntimeCore {
                         let _ = responder.send(Err(RuntimeError::terminated()));
                         continue;
                     }
+                    let watchdog = match self.start_sync_watchdog() {
+                        Ok(watchdog) => watchdog,
+                        Err(err) => {
+                            let _ = responder.send(Err(err));
+                            continue;
+                        }
+                    };
                     let result = self.eval_module_sync(&specifier);
+                    let result =
+                        self.apply_watchdog_result(result, watchdog, "Sync module evaluation");
                     let _ = responder.send(result);
                 }
                 RuntimeCommand::EvalModuleAsync {
@@ -466,6 +491,84 @@ impl RuntimeCore {
 
     fn should_reject_new_work(&self) -> bool {
         self.terminated || self.termination.is_requested()
+    }
+
+    fn start_sync_watchdog(&self) -> RuntimeResult<Option<SyncWatchdog>> {
+        match self.execution_timeout {
+            None => Ok(None),
+            Some(duration) => {
+                let fired = Arc::new(AtomicBool::new(false));
+                let fired_for_thread = fired.clone();
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                let cancel_for_thread = cancel_flag.clone();
+                let termination = self.termination.clone();
+                let handle = thread::Builder::new()
+                    .name("jsrun-sync-watchdog".to_string())
+                    .spawn(move || {
+                        let deadline = Instant::now() + duration;
+                        loop {
+                            if cancel_for_thread.load(Ordering::Acquire) {
+                                return;
+                            }
+
+                            let now = Instant::now();
+                            if now >= deadline {
+                                fired_for_thread.store(true, Ordering::Release);
+                                termination.terminate_execution();
+                                return;
+                            }
+
+                            let remaining = deadline.saturating_duration_since(now);
+                            let sleep_dur = remaining.min(Duration::from_millis(10));
+                            thread::sleep(sleep_dur);
+                        }
+                    })
+                    .map_err(|e| {
+                        RuntimeError::internal(format!("Failed to spawn watchdog thread: {}", e))
+                    })?;
+                Ok(Some(SyncWatchdog {
+                    handle,
+                    fired,
+                    cancel_flag,
+                    duration,
+                }))
+            }
+        }
+    }
+
+    fn resolve_sync_watchdog(&mut self, watchdog: SyncWatchdog) -> RuntimeResult<(bool, Duration)> {
+        watchdog.cancel_flag.store(true, Ordering::Release);
+        if watchdog.handle.join().is_err() {
+            return Err(RuntimeError::internal("Watchdog thread panicked"));
+        }
+        let fired = watchdog.fired.load(Ordering::Acquire);
+        if fired {
+            let isolate = self.js_runtime.v8_isolate();
+            let _ = isolate.cancel_terminate_execution();
+        }
+        Ok((fired, watchdog.duration))
+    }
+
+    fn apply_watchdog_result(
+        &mut self,
+        result: RuntimeResult<JSValue>,
+        watchdog: Option<SyncWatchdog>,
+        context: &str,
+    ) -> RuntimeResult<JSValue> {
+        if let Some(watchdog) = watchdog {
+            let (fired, duration) = self.resolve_sync_watchdog(watchdog)?;
+            if fired {
+                let message = format!("{context} timed out after {}ms", duration.as_millis());
+                return match result {
+                    Err(err) if Self::runtime_error_indicates_termination(&err) => {
+                        Err(RuntimeError::timeout(message))
+                    }
+                    Err(err) => Err(err),
+                    Ok(_) => Err(RuntimeError::timeout(message)),
+                };
+            }
+        }
+        result
     }
 
     fn finalize_termination(&mut self) -> RuntimeResult<()> {
