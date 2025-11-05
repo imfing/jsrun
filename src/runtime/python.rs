@@ -403,9 +403,29 @@ impl Runtime {
         Ok(RuntimeStats::from_snapshot(snapshot))
     }
 
+    fn _debug_tracked_function_count(&self) -> PyResult<usize> {
+        let handle = self.handle.borrow();
+        Ok(handle
+            .as_ref()
+            .map(|handle| handle.tracked_function_count())
+            .unwrap_or(0))
+    }
+
     fn close(&self) -> PyResult<()> {
         let mut handle = self.handle.borrow_mut();
         if let Some(mut runtime) = handle.take() {
+            for fn_id in runtime.drain_tracked_function_ids() {
+                if runtime.is_shutdown() {
+                    break;
+                }
+                if let Err(err) = runtime.release_function(fn_id) {
+                    log::debug!(
+                        "Runtime.close failed to release function id {}: {}",
+                        fn_id,
+                        err
+                    );
+                }
+            }
             runtime
                 .close()
                 .map_err(|e| runtime_error_with_context("Shutdown failed", e))?;
@@ -668,7 +688,7 @@ impl Runtime {
 ///
 /// This class represents a JavaScript function that can be called from Python.
 /// Functions are awaitable by default (async-first design).
-#[pyclass(unsendable)]
+#[pyclass(unsendable, weakref)] // allow Python weak references for finalizers
 pub struct JsFunction {
     handle: std::cell::RefCell<Option<RuntimeHandle>>,
     fn_id: u32,
@@ -676,12 +696,17 @@ pub struct JsFunction {
 }
 
 impl JsFunction {
-    pub fn new(handle: RuntimeHandle, fn_id: u32) -> PyResult<Self> {
-        Ok(Self {
+    pub fn new(py: Python<'_>, handle: RuntimeHandle, fn_id: u32) -> PyResult<Py<Self>> {
+        handle.track_function_id(fn_id);
+        let finalizer_handle = handle.clone();
+        let instance = Self {
             handle: std::cell::RefCell::new(Some(handle)),
             fn_id,
             closed: std::cell::Cell::new(false),
-        })
+        };
+        let py_obj = Py::new(py, instance)?;
+        Self::attach_finalizer(py, &py_obj, finalizer_handle, fn_id)?;
+        Ok(py_obj)
     }
 
     /// Get the function ID for transfer back to JavaScript.
@@ -708,6 +733,19 @@ impl JsFunction {
         }
 
         Ok(self.fn_id)
+    }
+
+    fn attach_finalizer(
+        py: Python<'_>,
+        py_obj: &Py<Self>,
+        handle: RuntimeHandle,
+        fn_id: u32,
+    ) -> PyResult<()> {
+        let weakref = py.import("weakref")?;
+        let finalize = weakref.getattr(pyo3::intern!(py, "finalize"))?;
+        let finalizer = Py::new(py, JsFunctionFinalizer::new(handle, fn_id))?;
+        finalize.call1((py_obj.clone_ref(py), finalizer))?;
+        Ok(())
     }
 }
 
@@ -785,15 +823,19 @@ impl JsFunction {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Runtime has been shut down"))?
             .clone();
+        self.handle.borrow_mut().take();
 
         let fn_id = self.fn_id;
         self.closed.set(true);
 
+        let untrack_handle = handle.clone();
         let future = async move {
-            handle
+            let result = handle
                 .release_function_async(fn_id)
                 .await
-                .map_err(|e| runtime_error_with_context("Failed to release function", e))
+                .map_err(|e| runtime_error_with_context("Failed to release function", e));
+            untrack_handle.untrack_function_id(fn_id);
+            result
         };
 
         pyo3_async_runtimes::tokio::future_into_py(py, future)
@@ -807,20 +849,43 @@ impl JsFunction {
             format!("<JsFunction id={}>", self.fn_id)
         }
     }
+}
 
-    /// Destructor that warns if the function wasn't closed.
-    fn __del__(&self) {
-        if !self.closed.get() {
-            // Note: Can't do async cleanup in __del__, user must call close()
-            Python::attach(|py| {
-                if let Ok(warnings) = py.import("warnings") {
-                    let message = format!(
-                        "JsFunction id={} not closed before drop. Call .close() explicitly.",
-                        self.fn_id
-                    );
-                    let _ = warnings.call_method1("warn", (message, "ResourceWarning"));
-                }
-            });
+#[pyclass(module = "_jsrun", name = "_JsFunctionFinalizer", unsendable)]
+pub(crate) struct JsFunctionFinalizer {
+    handle: std::cell::RefCell<Option<RuntimeHandle>>,
+    fn_id: u32,
+}
+
+impl JsFunctionFinalizer {
+    fn new(handle: RuntimeHandle, fn_id: u32) -> Self {
+        Self {
+            handle: std::cell::RefCell::new(Some(handle)),
+            fn_id,
+        }
+    }
+}
+
+#[pymethods]
+impl JsFunctionFinalizer {
+    fn __call__(&self) {
+        let mut handle = self.handle.borrow_mut();
+        if let Some(runtime_handle) = handle.take() {
+            if !runtime_handle.is_function_tracked(self.fn_id) {
+                return;
+            }
+            if runtime_handle.is_shutdown() {
+                runtime_handle.untrack_function_id(self.fn_id);
+                return;
+            }
+            if let Err(err) = runtime_handle.release_function(self.fn_id) {
+                log::debug!(
+                    "JsFunction finalizer failed to release function id {}: {}",
+                    self.fn_id,
+                    err
+                );
+            }
+            runtime_handle.untrack_function_id(self.fn_id);
         }
     }
 }

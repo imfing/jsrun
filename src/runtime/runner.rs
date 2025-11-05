@@ -1000,9 +1000,9 @@ impl RuntimeCore {
     /// Remove a function from the registry, freeing its V8 global handle.
     fn release_function(&mut self, fn_id: u32) -> RuntimeResult<()> {
         let mut registry = self.fn_registry.borrow_mut();
-        registry
-            .remove(&fn_id)
-            .ok_or_else(|| RuntimeError::internal(format!("Function ID {} not found", fn_id)))?;
+        if registry.remove(&fn_id).is_none() {
+            log::debug!("Attempted to release unknown function id {}", fn_id);
+        }
         Ok(())
     }
 

@@ -130,9 +130,8 @@ pub(crate) fn js_value_to_python(
                 PyRuntimeError::new_err("RuntimeHandle required to convert JSValue::Function")
             })?;
 
-            let js_fn = super::python::JsFunction::new(handle.clone(), *id)?;
-            let py_obj: Py<PyAny> = Py::new(py, js_fn)?.into();
-            Ok(py_obj)
+            let js_fn = super::python::JsFunction::new(py, handle.clone(), *id)?;
+            Ok(js_fn.into_any())
         }
     }
 }

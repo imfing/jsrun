@@ -1,5 +1,8 @@
 """Tests for JavaScript function calling from Python."""
 
+import gc
+import weakref
+
 import pytest
 from jsrun import JavaScriptError, Runtime
 
@@ -155,3 +158,40 @@ async def test_function_from_closed_runtime_transfer():
     # Trying to pass the function from closed runtime should give a clear error
     with pytest.raises(RuntimeError, match="Runtime has been shut down"):
         await apply_fn(multiply)
+
+
+def test_function_finalizer_releases_handles():
+    """JsFunction proxies release their V8 handles when GC'd."""
+    with Runtime() as rt:
+        js_func = rt.eval("(x) => x + 1")
+        assert rt._debug_tracked_function_count() == 1
+
+        func_ref = weakref.ref(js_func)
+        js_func = None
+
+        for _ in range(3):
+            gc.collect()
+
+        assert func_ref() is None
+        assert rt._debug_tracked_function_count() == 0
+
+
+def test_runtime_close_releases_outstanding_functions():
+    """Runtime.close releases any remaining JsFunction handles."""
+    rt = Runtime()
+    fn_a = rt.eval("(x) => x")
+    fn_b = rt.eval("(x) => x * 2")
+    assert rt._debug_tracked_function_count() == 2
+
+    rt.close()
+    assert rt._debug_tracked_function_count() == 0
+
+    ref_a = weakref.ref(fn_a)
+    ref_b = weakref.ref(fn_b)
+    fn_a = None
+    fn_b = None
+    for _ in range(3):
+        gc.collect()
+
+    assert ref_a() is None
+    assert ref_b() is None

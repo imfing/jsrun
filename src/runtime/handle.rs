@@ -9,6 +9,7 @@ use crate::runtime::stats::RuntimeStatsSnapshot;
 use pyo3::prelude::Py;
 use pyo3::PyAny;
 use pyo3_async_runtimes::TaskLocals;
+use std::collections::HashSet;
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -22,6 +23,7 @@ pub struct RuntimeHandle {
     tx: Option<async_mpsc::UnboundedSender<RuntimeCommand>>,
     shutdown: Arc<Mutex<bool>>,
     termination: TerminationController,
+    tracked_functions: Arc<Mutex<HashSet<u32>>>,
 }
 
 impl RuntimeHandle {
@@ -31,6 +33,7 @@ impl RuntimeHandle {
             tx: Some(tx),
             shutdown: Arc::new(Mutex::new(false)),
             termination,
+            tracked_functions: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -227,6 +230,22 @@ impl RuntimeHandle {
     }
 
     /// Release a function handle so the underlying V8 global can be dropped.
+    pub fn release_function(&self, fn_id: u32) -> RuntimeResult<()> {
+        let sender = self.sender()?.clone();
+        let (result_tx, result_rx) = oneshot::channel();
+
+        sender
+            .send(RuntimeCommand::ReleaseFunction {
+                fn_id,
+                responder: result_tx,
+            })
+            .map_err(|_| RuntimeError::internal("Failed to send release_function command"))?;
+
+        result_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::internal("Failed to receive release result"))?
+    }
+
     pub async fn release_function_async(&self, fn_id: u32) -> RuntimeResult<()> {
         let sender = self.sender()?.clone();
         let (result_tx, result_rx) = oneshot::channel();
@@ -341,5 +360,30 @@ impl RuntimeHandle {
         }
 
         Ok(())
+    }
+
+    pub fn track_function_id(&self, fn_id: u32) {
+        let mut set = self.tracked_functions.lock().unwrap();
+        set.insert(fn_id);
+    }
+
+    pub fn untrack_function_id(&self, fn_id: u32) {
+        let mut set = self.tracked_functions.lock().unwrap();
+        set.remove(&fn_id);
+    }
+
+    pub fn drain_tracked_function_ids(&self) -> Vec<u32> {
+        let mut set = self.tracked_functions.lock().unwrap();
+        set.drain().collect()
+    }
+
+    pub fn is_function_tracked(&self, fn_id: u32) -> bool {
+        let set = self.tracked_functions.lock().unwrap();
+        set.contains(&fn_id)
+    }
+
+    pub fn tracked_function_count(&self) -> usize {
+        let set = self.tracked_functions.lock().unwrap();
+        set.len()
     }
 }
