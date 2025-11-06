@@ -205,7 +205,7 @@ class TestModuleEvaluation:
                 """,
             )
             # Should complete within timeout
-            result = await rt.eval_module_async("slow", timeout_ms=5000)
+            result = await rt.eval_module_async("slow", timeout=5.0)
             assert result is not None
             assert result["value"] == 123
 

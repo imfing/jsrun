@@ -8,12 +8,13 @@ use super::js_value::JSValue;
 use super::ops::PythonOpMode;
 use super::stats::{RuntimeCallKind, RuntimeStatsSnapshot};
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyRuntimeError};
+use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3_async_runtimes::{tokio as pyo3_tokio, TaskLocals};
 use std::future::Future;
 use std::sync::OnceLock;
+use std::time::Duration;
 use tokio::sync::oneshot;
 
 #[pyclass(unsendable)]
@@ -104,6 +105,80 @@ pub(crate) fn runtime_error_to_py(err: RuntimeError) -> PyErr {
 
 pub(crate) fn runtime_error_with_context(context: &str, err: RuntimeError) -> PyErr {
     Python::attach(|py| runtime_error_to_py_with(py, err, Some(context)))
+}
+
+/// Normalize a Python timeout value to milliseconds.
+///
+/// Accepts:
+/// - `None` -> `None`
+/// - `float` or `int` (seconds) -> `Some(u64)` milliseconds
+/// - `datetime.timedelta` -> `Some(u64)` milliseconds
+///
+/// Rejects:
+/// - Negative values
+/// - Zero values
+/// - Invalid types
+///
+/// Returns milliseconds as `Option<u64>` for internal use.
+fn validate_timeout_seconds(seconds: f64) -> PyResult<()> {
+    if !seconds.is_finite() {
+        return Err(PyValueError::new_err("Timeout must be finite"));
+    }
+    if seconds < 0.0 {
+        return Err(PyValueError::new_err("Timeout cannot be negative"));
+    }
+    if seconds == 0.0 {
+        return Err(PyValueError::new_err("Timeout cannot be zero"));
+    }
+    if seconds > u64::MAX as f64 {
+        return Err(PyValueError::new_err("Timeout is too large"));
+    }
+    Ok(())
+}
+
+fn normalize_timeout_to_ms<'py>(timeout: Option<&Bound<'py, PyAny>>) -> PyResult<Option<u64>> {
+    let Some(timeout_value) = timeout else {
+        return Ok(None);
+    };
+
+    let duration = if let Ok(seconds) = timeout_value.extract::<f64>() {
+        validate_timeout_seconds(seconds)?;
+        Duration::from_secs_f64(seconds)
+    } else if let Ok(seconds) = timeout_value.extract::<u64>() {
+        if seconds == 0 {
+            return Err(PyValueError::new_err("Timeout cannot be zero"));
+        }
+        Duration::from_secs(seconds)
+    } else if let Ok(seconds) = timeout_value.extract::<i64>() {
+        if seconds < 0 {
+            return Err(PyValueError::new_err("Timeout cannot be negative"));
+        }
+        if seconds == 0 {
+            return Err(PyValueError::new_err("Timeout cannot be zero"));
+        }
+        Duration::from_secs(seconds as u64)
+    } else {
+        // Try to extract as timedelta
+        let py = timeout_value.py();
+        let timedelta = py.import("datetime")?.getattr("timedelta")?;
+        if timeout_value.is_instance(&timedelta)? {
+            let total_seconds: f64 = timeout_value.getattr("total_seconds")?.call0()?.extract()?;
+            validate_timeout_seconds(total_seconds)?;
+            Duration::from_secs_f64(total_seconds)
+        } else {
+            return Err(PyValueError::new_err(
+                "Timeout must be a number (seconds), datetime.timedelta, or None",
+            ));
+        }
+    };
+
+    // Convert to milliseconds, handling overflow
+    let millis = duration.as_millis();
+    if millis > u128::from(u64::MAX) {
+        Ok(Some(u64::MAX))
+    } else {
+        Ok(Some(millis as u64))
+    }
 }
 
 /// Return true if the supplied Python future has been cancelled.
@@ -546,12 +621,12 @@ impl Runtime {
         Self::init_with_config(runtime_config)
     }
 
-    #[pyo3(signature = (code, /, *, timeout_ms=None))]
+    #[pyo3(signature = (code, /, *, timeout=None))]
     fn eval_async<'py>(
         &self,
         py: Python<'py>,
         code: String,
-        timeout_ms: Option<u64>,
+        timeout: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let handle = self
             .handle
@@ -559,6 +634,8 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Runtime has been closed"))?
             .clone();
+
+        let timeout_ms = normalize_timeout_to_ms(timeout)?;
 
         let task_locals = pyo3_tokio::get_current_locals(py)?;
         let handle_for_conversion = handle.clone();
@@ -844,12 +921,12 @@ impl Runtime {
         js_value_to_python(py, &js_value, Some(&handle))
     }
 
-    #[pyo3(signature = (specifier, /, *, timeout_ms=None))]
+    #[pyo3(signature = (specifier, /, *, timeout=None))]
     fn eval_module_async<'py>(
         &self,
         py: Python<'py>,
         specifier: String,
-        timeout_ms: Option<u64>,
+        timeout: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let handle = self
             .handle
@@ -857,6 +934,8 @@ impl Runtime {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("Runtime has been closed"))?
             .clone();
+
+        let timeout_ms = normalize_timeout_to_ms(timeout)?;
 
         let task_locals = pyo3_tokio::get_current_locals(py)?;
         let handle_for_conversion = handle.clone();
@@ -965,16 +1044,16 @@ impl JsFunction {
     ///
     /// Args:
     ///     *args: Arguments to pass to the JavaScript function
-    ///     timeout_ms: Optional timeout in milliseconds
+    ///     timeout: Optional timeout (seconds as float/int, or datetime.timedelta)
     ///
     /// Returns:
     ///     An awaitable that resolves to the function's return value
-    #[pyo3(signature = (*args, timeout_ms=None))]
+    #[pyo3(signature = (*args, timeout=None))]
     fn __call__<'py>(
         &self,
         py: Python<'py>,
         args: &Bound<'py, pyo3::types::PyTuple>,
-        timeout_ms: Option<u64>,
+        timeout: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         // Check if closed
         if self.closed.get() {
@@ -997,6 +1076,8 @@ impl JsFunction {
         for arg in args.iter() {
             js_args.push(python_to_js_value(arg)?);
         }
+
+        let timeout_ms = normalize_timeout_to_ms(timeout)?;
 
         let task_locals = pyo3_tokio::get_current_locals(py)?;
         let call_task_locals = Some(task_locals.clone());

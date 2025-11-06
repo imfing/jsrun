@@ -3,6 +3,7 @@ Type stubs for the jsrun Python extension module.
 """
 
 import types
+from datetime import timedelta
 from typing import (
     Any,
     Awaitable,
@@ -138,13 +139,15 @@ class JsFunction:
     Instances are awaitable callables that execute on the underlying V8 isolate.
     """
 
-    def __call__(self, *args: Any, timeout_ms: Optional[int] = ...) -> Awaitable[Any]:
+    def __call__(
+        self, *args: Any, timeout: Optional[float | int | timedelta] = ...
+    ) -> Awaitable[Any]:
         """
         Invoke the JavaScript function with the provided arguments.
 
         Args:
             *args: Arguments forwarded into JavaScript
-            timeout_ms: Optional timeout for this call in milliseconds
+            timeout: Optional timeout (seconds as float/int, or datetime.timedelta)
 
         Returns:
             An awaitable that resolves to the JavaScript return value.
@@ -255,7 +258,9 @@ class Runtime:
         """
         ...
 
-    async def eval_async(self, code: str, *, timeout_ms: Optional[int] = None) -> Any:
+    async def eval_async(
+        self, code: str, *, timeout: Optional[float | int | timedelta] = None
+    ) -> Any:
         """
         Evaluate JavaScript code asynchronously.
 
@@ -264,7 +269,7 @@ class Runtime:
 
         Args:
             code: JavaScript source code to evaluate
-            timeout_ms: Optional timeout in milliseconds
+            timeout: Optional timeout (seconds as float/int, or datetime.timedelta)
 
         Returns:
             The native Python representation of the result (int, str, dict, list, etc.)
@@ -513,7 +518,7 @@ class Runtime:
         ...
 
     async def eval_module_async(
-        self, specifier: str, *, timeout_ms: Optional[int] = None
+        self, specifier: str, *, timeout: Optional[float | int | timedelta] = None
     ) -> Any:
         """
         Evaluate a JavaScript module asynchronously.
@@ -523,7 +528,7 @@ class Runtime:
 
         Args:
             specifier: Module specifier to evaluate
-            timeout_ms: Optional timeout in milliseconds
+            timeout: Optional timeout (seconds as float/int, or datetime.timedelta)
 
         Returns:
             The native Python representation of the module namespace (dict-like object)

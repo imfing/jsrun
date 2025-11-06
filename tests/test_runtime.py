@@ -9,7 +9,7 @@ surface promise/timeouts/errors consistently with the Rust core.
 import asyncio
 import math
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from jsrun import (
@@ -826,9 +826,7 @@ class TestRuntimeTimeout:
     async def test_eval_async_timeout_success(self):
         """Test that fast promises complete before timeout."""
         with Runtime() as runtime:
-            result = await runtime.eval_async(
-                "Promise.resolve('quick')", timeout_ms=1000
-            )
+            result = await runtime.eval_async("Promise.resolve('quick')", timeout=1.0)
             assert result == "quick"
 
     @pytest.mark.asyncio
@@ -838,7 +836,7 @@ class TestRuntimeTimeout:
             # Promise that never resolves
             code = "new Promise(() => {})"
             with pytest.raises(RuntimeError) as exc_info:
-                await runtime.eval_async(code, timeout_ms=100)
+                await runtime.eval_async(code, timeout=0.1)
             message = str(exc_info.value)
             assert "Evaluation failed" in message
             assert "pending" in message
@@ -860,13 +858,111 @@ class TestRuntimeTimeout:
                     .then(() => Promise.resolve())
                     .then(() => 'nested')
             """
-            result = await runtime.eval_async(code, timeout_ms=1000)
+            result = await runtime.eval_async(code, timeout=1.0)
             assert result == "nested"
+
+    @pytest.mark.asyncio
+    async def test_eval_async_timeout_with_timedelta(self):
+        """Test timeout with datetime.timedelta."""
+        from datetime import timedelta
+
+        with Runtime() as runtime:
+            result = await runtime.eval_async(
+                "Promise.resolve('timedelta')", timeout=timedelta(seconds=1)
+            )
+            assert result == "timedelta"
+
+    @pytest.mark.asyncio
+    async def test_eval_async_timeout_with_int_seconds(self):
+        """Test timeout with integer seconds."""
+        with Runtime() as runtime:
+            result = await runtime.eval_async("Promise.resolve('int')", timeout=1)
+            assert result == "int"
+
+
+class TestTimeoutValidation:
+    """Unified tests for timeout parameter validation across all async methods."""
+
+    @pytest.mark.parametrize(
+        "timeout_value,expected_error",
+        [
+            (-1.0, "Timeout cannot be negative"),
+            (-5, "Timeout cannot be negative"),
+            (timedelta(seconds=-1), "Timeout cannot be negative"),
+            (0, "Timeout cannot be zero"),
+            (0.0, "Timeout cannot be zero"),
+            (timedelta(seconds=0), "Timeout cannot be zero"),
+            (float("nan"), "Timeout must be finite"),
+            (float("inf"), "Timeout must be finite"),
+            (float("-inf"), "Timeout must be finite"),
+            ("invalid", "Timeout must be a number"),
+            ([1, 2, 3], "Timeout must be a number"),
+            ({"timeout": 1}, "Timeout must be a number"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_eval_async_timeout_validation(self, timeout_value, expected_error):
+        """Test eval_async rejects invalid timeout values."""
+        with Runtime() as runtime:
+            with pytest.raises(ValueError, match=expected_error):
+                await runtime.eval_async("Promise.resolve(1)", timeout=timeout_value)
+
+    @pytest.mark.parametrize(
+        "timeout_value,expected_error",
+        [
+            (-1.0, "Timeout cannot be negative"),
+            (-5, "Timeout cannot be negative"),
+            (timedelta(seconds=-1), "Timeout cannot be negative"),
+            (0, "Timeout cannot be zero"),
+            (0.0, "Timeout cannot be zero"),
+            (timedelta(seconds=0), "Timeout cannot be zero"),
+            (float("nan"), "Timeout must be finite"),
+            (float("inf"), "Timeout must be finite"),
+            (float("-inf"), "Timeout must be finite"),
+            ("invalid", "Timeout must be a number"),
+            ([1, 2, 3], "Timeout must be a number"),
+            ({"timeout": 1}, "Timeout must be a number"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_eval_module_async_timeout_validation(
+        self, timeout_value, expected_error
+    ):
+        """Test eval_module_async rejects invalid timeout values."""
+        with Runtime() as runtime:
+            runtime.add_static_module("test", "export const value = 42;")
+            with pytest.raises(ValueError, match=expected_error):
+                await runtime.eval_module_async("test", timeout=timeout_value)
+
+    @pytest.mark.parametrize(
+        "timeout_value,expected_error",
+        [
+            (-1.0, "Timeout cannot be negative"),
+            (-5, "Timeout cannot be negative"),
+            (timedelta(seconds=-1), "Timeout cannot be negative"),
+            (0, "Timeout cannot be zero"),
+            (0.0, "Timeout cannot be zero"),
+            (timedelta(seconds=0), "Timeout cannot be zero"),
+            (float("nan"), "Timeout must be finite"),
+            (float("inf"), "Timeout must be finite"),
+            (float("-inf"), "Timeout must be finite"),
+            ("invalid", "Timeout must be a number"),
+            ([1, 2, 3], "Timeout must be a number"),
+            ({"timeout": 1}, "Timeout must be a number"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_js_function_call_timeout_validation(
+        self, timeout_value, expected_error
+    ):
+        """Test JsFunction.__call__ rejects invalid timeout values."""
+        with Runtime() as runtime:
+            fn = runtime.eval("(x) => x * 2")
+            with pytest.raises(ValueError, match=expected_error):
+                await fn(21, timeout=timeout_value)
 
 
 class TestRuntimeAsyncConcurrency:
-    """Test concurrent async runtime operations."""
-
     @pytest.mark.asyncio
     async def test_multiple_async_evals_sequential(self):
         """Test sequential async evaluations."""
