@@ -239,6 +239,7 @@ impl RuntimeCore {
             initial_heap_size,
             execution_timeout,
             bootstrap_script,
+            enable_console,
         } = config;
 
         if initial_heap_size.is_some() && max_heap_size.is_none() {
@@ -270,6 +271,30 @@ impl RuntimeCore {
             module_loader: Some(module_loader.clone()),
             ..Default::default()
         });
+
+        // Disable console if enable_console is set to false, since Deno's bootstrap script enables console by default
+        if enable_console == Some(false) {
+            js_runtime
+                .execute_script(
+                    "<disable_console>",
+                    r#"
+                    (() => {
+                        const noop = () => {};
+                        const stub = new Proxy(Object.create(null), { get: () => noop });
+                        const existing = globalThis.console;
+                        if (typeof existing === "object" && existing !== null) {
+                            for (const key of Reflect.ownKeys(existing)) {
+                                try { existing[key] = noop; } catch (_) {} // ignore non-writable properties
+                            }
+                            return;
+                        }
+                        globalThis.console = stub;
+                    })();
+                    "#
+                    .to_string(),
+                )
+                .map_err(|err| RuntimeError::javascript(JsExceptionDetails::from_js_error(*err)))?;
+        }
 
         if let Some(script) = bootstrap_script {
             js_runtime

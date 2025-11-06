@@ -1161,6 +1161,47 @@ class TestRuntimeConfig:
             result2 = runtime2.eval("typeof instance1")
             assert result2 == "undefined"
 
+    def test_runtime_config_console_enabled_by_default(self):
+        """Test that console is enabled by default."""
+        from jsrun import Runtime, RuntimeConfig
+
+        config = RuntimeConfig()
+        assert config.enable_console is True
+
+        with Runtime(config) as runtime:
+            # Console should exist
+            console_type = runtime.eval("typeof console")
+            assert console_type == "object"
+
+            # Console methods should be callable
+            result = runtime.eval("typeof console.log")
+            assert result == "function"
+
+            # Test that calling console methods doesn't raise errors
+            runtime.eval("console.log('test')")
+            runtime.eval("console.error('test')")
+            runtime.eval("console.warn('test')")
+
+    def test_runtime_config_console_disabled(self):
+        """Test that console can be disabled."""
+        from jsrun import Runtime, RuntimeConfig
+
+        config = RuntimeConfig(enable_console=False)
+        assert config.enable_console is False
+
+        with Runtime(config) as runtime:
+            # Console should either be undefined or a stub
+            console_type = runtime.eval("typeof console")
+            # When disabled, console is either deleted (undefined) or replaced with stub
+            assert console_type in ("undefined", "object")
+
+            # If console exists (stub), methods should be no-ops
+            if console_type == "object":
+                # Methods should exist but be no-ops
+                runtime.eval("console.log('test')")  # Should not raise
+                runtime.eval("console.error('test')")  # Should not raise
+                runtime.eval("console.warn('test')")  # Should not raise
+
 
 class TestRuntimeNativeTypes:
     """Tests for native Python type return from eval."""

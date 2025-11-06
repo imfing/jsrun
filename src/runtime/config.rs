@@ -9,7 +9,7 @@ use std::time::Duration;
 
 /// Runtime configuration for a single JavaScript isolate.
 #[pyclass(module = "jsrun")]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)] // Exposed to Python bindings; some fields are not wired yet in Rust.
 pub struct RuntimeConfig {
     /// Maximum heap size in bytes (None = V8 default)
@@ -23,6 +23,21 @@ pub struct RuntimeConfig {
 
     /// Bootstrap script to run on startup
     pub bootstrap_script: Option<String>,
+
+    /// Enable console output (default: true)
+    pub enable_console: Option<bool>,
+}
+
+impl Default for RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_heap_size: None,
+            initial_heap_size: None,
+            execution_timeout: None,
+            bootstrap_script: None,
+            enable_console: Some(true),
+        }
+    }
 }
 
 #[pymethods]
@@ -33,13 +48,15 @@ impl RuntimeConfig {
         max_heap_size = None,
         initial_heap_size = None,
         bootstrap = None,
-        timeout = None
+        timeout = None,
+        enable_console = Some(true),
     ))]
     fn new(
         max_heap_size: Option<usize>,
         initial_heap_size: Option<usize>,
         bootstrap: Option<String>,
         timeout: Option<&Bound<'_, PyAny>>,
+        enable_console: Option<bool>,
     ) -> PyResult<Self> {
         let mut config = RuntimeConfig::default();
 
@@ -81,6 +98,11 @@ impl RuntimeConfig {
                 }
             };
             config.execution_timeout = Some(duration);
+        }
+
+        // Set enable console if provided
+        if let Some(enable) = enable_console {
+            config.enable_console = Some(enable);
         }
 
         Ok(config)
@@ -156,6 +178,12 @@ impl RuntimeConfig {
         Ok(())
     }
 
+    /// Get enable console.
+    #[getter]
+    fn enable_console(&self) -> Option<bool> {
+        self.enable_console
+    }
+
     fn __repr__(&self) -> String {
         format!("RuntimeConfig({:?})", self)
     }
@@ -172,6 +200,7 @@ mod tests {
         assert!(config.initial_heap_size.is_none());
         assert!(config.execution_timeout.is_none());
         assert!(config.bootstrap_script.is_none());
+        assert_eq!(config.enable_console, Some(true));
     }
 
     #[allow(clippy::field_reassign_with_default)]
