@@ -7,6 +7,7 @@ use super::handle::RuntimeHandle;
 use super::inspector::InspectorMetadata;
 use super::js_value::JSValue;
 use super::ops::PythonOpMode;
+use super::runner::FunctionCallResult;
 use super::stats::{RuntimeCallKind, RuntimeStatsSnapshot};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
@@ -453,6 +454,8 @@ pub struct RuntimeStats {
     #[pyo3(get)]
     call_function_async_count: u64,
     #[pyo3(get)]
+    call_function_sync_count: u64,
+    #[pyo3(get)]
     active_async_ops: u64,
     #[pyo3(get)]
     open_resources: u64,
@@ -479,6 +482,7 @@ impl RuntimeStats {
             eval_module_sync_count: snapshot.eval_module_sync_count,
             eval_module_async_count: snapshot.eval_module_async_count,
             call_function_async_count: snapshot.call_function_async_count,
+            call_function_sync_count: snapshot.call_function_sync_count,
             active_async_ops: snapshot.active_async_ops,
             open_resources: snapshot.open_resources,
             active_timers: snapshot.active_timers,
@@ -491,7 +495,7 @@ impl RuntimeStats {
 impl RuntimeStats {
     fn __repr__(&self) -> String {
         format!(
-            "RuntimeStats(heap_used_bytes={}, total_execution_time_ms={}, last_execution_kind={}, active_async_ops={}, open_resources={}, eval_sync_count={}, call_function_async_count={})",
+            "RuntimeStats(heap_used_bytes={}, total_execution_time_ms={}, last_execution_kind={}, active_async_ops={}, open_resources={}, eval_sync_count={}, call_function_async_count={}, call_function_sync_count={})",
             self.heap_used_bytes,
             self.total_execution_time_ms,
             self.last_execution_kind
@@ -500,7 +504,8 @@ impl RuntimeStats {
             self.active_async_ops,
             self.open_resources,
             self.eval_sync_count,
-            self.call_function_async_count
+            self.call_function_async_count,
+            self.call_function_sync_count
         )
     }
 }
@@ -1092,6 +1097,14 @@ impl JsFunction {
         finalize.call1((py_obj.clone_ref(py), finalizer))?;
         Ok(())
     }
+
+    fn convert_python_args(args: &Bound<'_, pyo3::types::PyTuple>) -> PyResult<Vec<JSValue>> {
+        let mut js_args = Vec::with_capacity(args.len());
+        for arg in args.iter() {
+            js_args.push(super::conversion::python_to_js_value(arg)?);
+        }
+        Ok(js_args)
+    }
 }
 
 #[pymethods]
@@ -1113,12 +1126,10 @@ impl JsFunction {
         args: &Bound<'py, pyo3::types::PyTuple>,
         timeout: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // Check if closed
         if self.closed.get() {
             return Err(PyRuntimeError::new_err("Function has been closed"));
         }
 
-        // Get handle
         let handle = self
             .handle
             .borrow()
@@ -1128,13 +1139,57 @@ impl JsFunction {
 
         let fn_id = self.fn_id;
 
-        // Convert Python args to Vec<JSValue>
-        use super::conversion::python_to_js_value;
-        let mut js_args = Vec::with_capacity(args.len());
-        for arg in args.iter() {
-            js_args.push(python_to_js_value(arg)?);
+        let js_args = Self::convert_python_args(args)?;
+        let timeout_ms = normalize_timeout_to_ms(timeout)?;
+
+        let call_result = handle
+            .call_function_sync(fn_id, js_args, timeout_ms)
+            .map_err(|e| runtime_error_with_context("Function call failed", e))?;
+
+        match call_result {
+            FunctionCallResult::Immediate(value) => {
+                let py_obj = js_value_to_python(py, &value, Some(&handle))?;
+                Ok(py_obj.into_bound(py))
+            }
+            FunctionCallResult::Pending { call_id } => {
+                let task_locals = pyo3_tokio::get_current_locals(py)?;
+                let call_task_locals = Some(task_locals.clone());
+                let handle_for_conversion = handle.clone();
+                let future =
+                    async move { handle.resume_function_call(call_id, call_task_locals).await };
+
+                bridge_js_future(
+                    py,
+                    task_locals,
+                    future,
+                    handle_for_conversion,
+                    "Function call failed",
+                )
+            }
+        }
+    }
+
+    /// Explicit async invocation that always returns an awaitable.
+    #[pyo3(signature = (*args, timeout=None))]
+    fn call_async<'py>(
+        &self,
+        py: Python<'py>,
+        args: &Bound<'py, pyo3::types::PyTuple>,
+        timeout: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if self.closed.get() {
+            return Err(PyRuntimeError::new_err("Function has been closed"));
         }
 
+        let handle = self
+            .handle
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Runtime has been shut down"))?
+            .clone();
+
+        let fn_id = self.fn_id;
+        let js_args = Self::convert_python_args(args)?;
         let timeout_ms = normalize_timeout_to_ms(timeout)?;
 
         let task_locals = pyo3_tokio::get_current_locals(py)?;

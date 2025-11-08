@@ -200,6 +200,7 @@ class RuntimeStats:
     eval_module_sync_count: int
     eval_module_async_count: int
     call_function_async_count: int
+    call_function_sync_count: int
     active_async_ops: int
     open_resources: int
     active_timers: int
@@ -227,21 +228,34 @@ class JsFunction:
     """
     Proxy for a JavaScript function returned from the runtime.
 
-    Instances are awaitable callables that execute on the underlying V8 isolate.
+    Instances execute on the underlying V8 isolate. Calling the proxy returns
+    either a direct value (for synchronous JavaScript functions) or an awaitable
+    object when the JavaScript side returns a pending Promise.
     """
 
     def __call__(
         self, *args: Any, timeout: Optional[float | int | timedelta] = ...
-    ) -> Awaitable[Any]:
+    ) -> Any | Awaitable[Any]:
         """
-        Invoke the JavaScript function with the provided arguments.
+        Invoke the JavaScript function with the provided arguments. If the JS
+        function finishes synchronously, its return value is produced directly.
+        Otherwise, the result is awaitable and must be awaited.
 
         Args:
             *args: Arguments forwarded into JavaScript
             timeout: Optional timeout (seconds as float/int, or datetime.timedelta)
 
         Returns:
-            An awaitable that resolves to the JavaScript return value.
+            Either the JavaScript return value or an awaitable resolving to it.
+        """
+        ...
+
+    def call_async(
+        self, *args: Any, timeout: Optional[float | int | timedelta] = ...
+    ) -> Awaitable[Any]:
+        """
+        Always invoke the JavaScript function asynchronously, returning an awaitable
+        regardless of whether the underlying JS completes synchronously.
         """
         ...
 

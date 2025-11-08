@@ -5,7 +5,9 @@ use crate::runtime::error::{RuntimeError, RuntimeResult};
 use crate::runtime::inspector::{InspectorConnectionState, InspectorMetadata};
 use crate::runtime::js_value::JSValue;
 use crate::runtime::ops::PythonOpMode;
-use crate::runtime::runner::{spawn_runtime_thread, RuntimeCommand, TerminationController};
+use crate::runtime::runner::{
+    spawn_runtime_thread, FunctionCallResult, RuntimeCommand, TerminationController,
+};
 use crate::runtime::stats::RuntimeStatsSnapshot;
 use pyo3::prelude::Py;
 use pyo3::PyAny;
@@ -212,6 +214,29 @@ impl RuntimeHandle {
     ///
     /// The `fn_id` must originate from the same runtime; arguments are transferred as
     /// `JSValue`s and executed with the runtime's async event loop.
+    pub fn call_function_sync(
+        &self,
+        fn_id: u32,
+        args: Vec<JSValue>,
+        timeout_ms: Option<u64>,
+    ) -> RuntimeResult<FunctionCallResult> {
+        let sender = self.sender()?.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        sender
+            .send(RuntimeCommand::CallFunctionSync {
+                fn_id,
+                args,
+                timeout_ms,
+                responder: result_tx,
+            })
+            .map_err(|_| RuntimeError::internal("Failed to send call_function_sync command"))?;
+
+        result_rx
+            .recv()
+            .map_err(|_| RuntimeError::internal("Failed to receive function call result"))?
+    }
+
     pub async fn call_function_async(
         &self,
         fn_id: u32,
@@ -235,6 +260,27 @@ impl RuntimeHandle {
         result_rx
             .await
             .map_err(|_| RuntimeError::internal("Failed to receive function call result"))?
+    }
+
+    pub async fn resume_function_call(
+        &self,
+        call_id: u64,
+        task_locals: Option<TaskLocals>,
+    ) -> RuntimeResult<JSValue> {
+        let sender = self.sender()?.clone();
+        let (result_tx, result_rx) = oneshot::channel();
+
+        sender
+            .send(RuntimeCommand::ResumeFunctionCall {
+                call_id,
+                task_locals,
+                responder: result_tx,
+            })
+            .map_err(|_| RuntimeError::internal("Failed to send resume_function_call command"))?;
+
+        result_rx
+            .await
+            .map_err(|_| RuntimeError::internal("Failed to receive resumed function call result"))?
     }
 
     /// Release a function handle so the underlying V8 global can be dropped.

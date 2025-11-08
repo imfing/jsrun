@@ -55,6 +55,20 @@ struct StoredFunction {
     receiver: Option<v8::Global<v8::Value>>,
 }
 
+/// Pending JavaScript promise produced by a synchronous call.
+struct PendingFunctionCall {
+    promise: v8::Global<v8::Promise>,
+    start_time: Instant,
+    deadline: Option<Instant>,
+    timeout_ms: Option<u64>,
+}
+
+/// Outcome of attempting to call a JS function synchronously.
+pub enum FunctionCallResult {
+    Immediate(JSValue),
+    Pending { call_id: u64 },
+}
+
 const TERMINATION_STATUS_RUNNING: u8 = 0;
 const TERMINATION_STATUS_REQUESTED: u8 = 1;
 const TERMINATION_STATUS_TERMINATED: u8 = 2;
@@ -162,10 +176,21 @@ pub enum RuntimeCommand {
         source: String,
         responder: Sender<RuntimeResult<()>>,
     },
+    CallFunctionSync {
+        fn_id: u32,
+        args: Vec<JSValue>,
+        timeout_ms: Option<u64>,
+        responder: Sender<RuntimeResult<FunctionCallResult>>,
+    },
     CallFunctionAsync {
         fn_id: u32,
         args: Vec<JSValue>,
         timeout_ms: Option<u64>,
+        task_locals: Option<TaskLocals>,
+        responder: oneshot::Sender<RuntimeResult<JSValue>>,
+    },
+    ResumeFunctionCall {
+        call_id: u64,
         task_locals: Option<TaskLocals>,
         responder: oneshot::Sender<RuntimeResult<JSValue>>,
     },
@@ -454,6 +479,29 @@ impl RuntimeDispatcher {
                 }
                 false
             }
+            RuntimeCommand::CallFunctionSync {
+                fn_id,
+                args,
+                timeout_ms,
+                responder,
+            } => {
+                let result = if self.core.should_reject_new_work() {
+                    Err(RuntimeError::terminated())
+                } else if let Err(err) = self.core.ensure_inspector_ready() {
+                    Err(err)
+                } else {
+                    match self.core.start_sync_watchdog() {
+                        Ok(watchdog) => {
+                            let result = self.core.call_function_sync(fn_id, args, timeout_ms);
+                            self.core
+                                .apply_watchdog_result(result, watchdog, "Sync function call")
+                        }
+                        Err(err) => Err(err),
+                    }
+                };
+                let _ = responder.send(result);
+                false
+            }
             RuntimeCommand::CallFunctionAsync {
                 fn_id,
                 args,
@@ -481,6 +529,37 @@ impl RuntimeDispatcher {
                 );
 
                 // Queue or activate the job
+                if self.active_job.is_none() {
+                    self.active_job = Some(Box::new(job));
+                } else {
+                    self.pending_jobs.push_back(Box::new(job));
+                }
+                false
+            }
+            RuntimeCommand::ResumeFunctionCall {
+                call_id,
+                task_locals,
+                responder,
+            } => {
+                if self.core.should_reject_new_work() {
+                    let _ = responder.send(Err(RuntimeError::terminated()));
+                    return false;
+                }
+                if let Err(err) = self.core.ensure_inspector_ready() {
+                    let _ = responder.send(Err(err));
+                    return false;
+                }
+
+                let pending = match self.core.take_pending_call(call_id) {
+                    Ok(pending) => pending,
+                    Err(err) => {
+                        let _ = responder.send(Err(err));
+                        return false;
+                    }
+                };
+
+                let job = ResumeFunctionCallJob::new(pending, task_locals, responder);
+
                 if self.active_job.is_none() {
                     self.active_job = Some(Box::new(job));
                 } else {
@@ -598,16 +677,7 @@ impl EvalAsyncJob {
         let start_time = Instant::now();
 
         // Determine effective timeout
-        let effective_timeout = timeout_ms.or_else(|| {
-            core.execution_timeout.map(|d| {
-                let millis = d.as_millis();
-                if millis > u128::from(u64::MAX) {
-                    u64::MAX
-                } else {
-                    millis as u64
-                }
-            })
-        });
+        let effective_timeout = core.effective_timeout_ms(timeout_ms);
 
         let deadline = effective_timeout.map(|ms| start_time + Duration::from_millis(ms));
 
@@ -1182,6 +1252,126 @@ impl RuntimeJob for CallFunctionAsyncJob {
     }
 }
 
+/// Job that resumes a previously-started JS function by awaiting its stored promise.
+struct ResumeFunctionCallJob {
+    promise: v8::Global<v8::Promise>,
+    task_locals: Option<TaskLocals>,
+    responder: oneshot::Sender<RuntimeResult<JSValue>>,
+    start_time: Instant,
+    deadline: Option<Instant>,
+    timeout_ms: Option<u64>,
+    state: ResumeFunctionCallJobState,
+}
+
+enum ResumeFunctionCallJobState {
+    Init,
+    Waiting,
+    Done,
+}
+
+impl ResumeFunctionCallJob {
+    fn new(
+        pending: PendingFunctionCall,
+        task_locals: Option<TaskLocals>,
+        responder: oneshot::Sender<RuntimeResult<JSValue>>,
+    ) -> Self {
+        Self {
+            promise: pending.promise,
+            task_locals,
+            responder,
+            start_time: pending.start_time,
+            deadline: pending.deadline,
+            timeout_ms: pending.timeout_ms,
+            state: ResumeFunctionCallJobState::Init,
+        }
+    }
+}
+
+impl RuntimeJob for ResumeFunctionCallJob {
+    fn kind(&self) -> RuntimeCallKind {
+        RuntimeCallKind::CallFunctionAsync
+    }
+
+    fn poll(&mut self, core: &mut RuntimeCoreState) -> std::task::Poll<RuntimeResult<JSValue>> {
+        use std::task::Poll;
+
+        if let Some(deadline) = self.deadline {
+            if Instant::now() >= deadline {
+                core.termination.terminate_execution();
+                return Poll::Ready(Err(RuntimeError::timeout(format!(
+                    "Function call timed out after {}ms",
+                    self.timeout_ms.unwrap_or(0)
+                ))));
+            }
+        }
+
+        loop {
+            match self.state {
+                ResumeFunctionCallJobState::Init => {
+                    if let Some(ref locals) = self.task_locals {
+                        core.task_locals = Some(locals.clone());
+                        core.module_loader.set_task_locals(locals.clone());
+                        core.js_runtime
+                            .op_state()
+                            .borrow_mut()
+                            .put(crate::runtime::ops::GlobalTaskLocals(Some(locals.clone())));
+                    }
+                    self.state = ResumeFunctionCallJobState::Waiting;
+                }
+                ResumeFunctionCallJobState::Waiting => {
+                    let promise_state = {
+                        let scope = &mut core.js_runtime.handle_scope();
+                        let promise_local: v8::Local<v8::Promise> =
+                            v8::Local::new(scope, &self.promise);
+                        promise_local.state()
+                    };
+
+                    return match promise_state {
+                        v8::PromiseState::Pending => Poll::Pending,
+                        v8::PromiseState::Fulfilled => {
+                            let scope = &mut core.js_runtime.handle_scope();
+                            let promise_local: v8::Local<v8::Promise> =
+                                v8::Local::new(scope, &self.promise);
+                            let result_value = promise_local.result(scope);
+                            let result = RuntimeCoreState::value_to_js_value(
+                                &core.fn_registry,
+                                &core.next_fn_id,
+                                scope,
+                                result_value,
+                            );
+                            self.state = ResumeFunctionCallJobState::Done;
+                            Poll::Ready(result)
+                        }
+                        v8::PromiseState::Rejected => {
+                            let js_error = {
+                                let scope = &mut core.js_runtime.handle_scope();
+                                let promise_local: v8::Local<v8::Promise> =
+                                    v8::Local::new(scope, &self.promise);
+                                let exception = promise_local.result(scope);
+                                *JsError::from_v8_exception(scope, exception)
+                            };
+                            let error = core.translate_js_error(js_error);
+                            self.state = ResumeFunctionCallJobState::Done;
+                            Poll::Ready(Err(error))
+                        }
+                    };
+                }
+                ResumeFunctionCallJobState::Done => {
+                    return Poll::Ready(Err(RuntimeError::internal("Job already completed")));
+                }
+            }
+        }
+    }
+
+    fn send_result(self: Box<Self>, result: RuntimeResult<JSValue>) {
+        let _ = self.responder.send(result);
+    }
+
+    fn start_time(&self) -> Instant {
+        self.start_time
+    }
+}
+
 pub fn spawn_runtime_thread(config: RuntimeConfig) -> RuntimeResult<SpawnRuntimeResult> {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<RuntimeCommand>();
     let (init_tx, init_rx): InitSignalChannel = std::sync::mpsc::channel();
@@ -1256,6 +1446,8 @@ struct RuntimeCoreState {
     execution_timeout: Option<Duration>,
     fn_registry: Rc<RefCell<HashMap<u32, StoredFunction>>>,
     next_fn_id: Rc<RefCell<u32>>,
+    pending_calls: Rc<RefCell<HashMap<u64, PendingFunctionCall>>>,
+    next_pending_call_id: Rc<RefCell<u64>>,
     stats_state: RuntimeStatsState,
     termination: TerminationController,
     terminated: bool,
@@ -1394,6 +1586,8 @@ impl RuntimeCoreState {
             execution_timeout,
             fn_registry: Rc::new(RefCell::new(HashMap::new())),
             next_fn_id: Rc::new(RefCell::new(0)),
+            pending_calls: Rc::new(RefCell::new(HashMap::new())),
+            next_pending_call_id: Rc::new(RefCell::new(0)),
             stats_state: RuntimeStatsState::default(),
             termination,
             terminated: false,
@@ -1446,6 +1640,50 @@ impl RuntimeCoreState {
             .op_state()
             .borrow_mut()
             .put(crate::runtime::ops::GlobalTaskLocals(None));
+    }
+
+    fn effective_timeout_ms(&self, timeout_ms: Option<u64>) -> Option<u64> {
+        timeout_ms.or_else(|| {
+            self.execution_timeout.map(|d| {
+                let millis = d.as_millis();
+                if millis > u128::from(u64::MAX) {
+                    u64::MAX
+                } else {
+                    millis as u64
+                }
+            })
+        })
+    }
+
+    fn store_pending_call(
+        &self,
+        promise: v8::Global<v8::Promise>,
+        start_time: Instant,
+        deadline: Option<Instant>,
+        timeout_ms: Option<u64>,
+    ) -> u64 {
+        let mut next_id = self.next_pending_call_id.borrow_mut();
+        let call_id = *next_id;
+        *next_id = next_id.wrapping_add(1);
+        self.pending_calls.borrow_mut().insert(
+            call_id,
+            PendingFunctionCall {
+                promise,
+                start_time,
+                deadline,
+                timeout_ms,
+            },
+        );
+        call_id
+    }
+
+    fn take_pending_call(&self, call_id: u64) -> RuntimeResult<PendingFunctionCall> {
+        self.pending_calls
+            .borrow_mut()
+            .remove(&call_id)
+            .ok_or_else(|| {
+                RuntimeError::internal(format!("Pending function call {} not found", call_id))
+            })
     }
 
     fn start_sync_watchdog(&self) -> RuntimeResult<Option<SyncWatchdog>> {
@@ -1504,12 +1742,12 @@ impl RuntimeCoreState {
         Ok((fired, watchdog.duration))
     }
 
-    fn apply_watchdog_result(
+    fn apply_watchdog_result<T>(
         &mut self,
-        result: RuntimeResult<JSValue>,
+        result: RuntimeResult<T>,
         watchdog: Option<SyncWatchdog>,
         context: &str,
-    ) -> RuntimeResult<JSValue> {
+    ) -> RuntimeResult<T> {
         if let Some(watchdog) = watchdog {
             let (fired, duration) = self.resolve_sync_watchdog(watchdog)?;
             if fired {
@@ -1536,6 +1774,7 @@ impl RuntimeCoreState {
         let _ = isolate.cancel_terminate_execution();
 
         self.fn_registry.borrow_mut().clear();
+        self.pending_calls.borrow_mut().clear();
         self.termination.mark_terminated();
         self.terminated = true;
         Ok(())
@@ -1678,6 +1917,144 @@ impl RuntimeCoreState {
             let local = deno_core::v8::Local::new(scope, module_namespace);
             Self::value_to_js_value(&this.fn_registry, &this.next_fn_id, scope, local.into())
         })
+    }
+
+    fn call_function_sync(
+        &mut self,
+        fn_id: u32,
+        args: Vec<JSValue>,
+        timeout_ms: Option<u64>,
+    ) -> RuntimeResult<FunctionCallResult> {
+        self.with_timing(RuntimeCallKind::CallFunctionSync, |this| {
+            this.invoke_function_sync(fn_id, args, timeout_ms)
+        })
+    }
+
+    fn invoke_function_sync(
+        &mut self,
+        fn_id: u32,
+        args: Vec<JSValue>,
+        timeout_ms: Option<u64>,
+    ) -> RuntimeResult<FunctionCallResult> {
+        if !self.fn_registry.borrow().contains_key(&fn_id) {
+            return Err(RuntimeError::internal(format!(
+                "Function ID {} not found",
+                fn_id
+            )));
+        }
+
+        let start_time = Instant::now();
+        let effective_timeout = self.effective_timeout_ms(timeout_ms);
+        let deadline = effective_timeout.map(|ms| start_time + Duration::from_millis(ms));
+
+        enum SyncCallOutcome {
+            Immediate(JSValue),
+            Pending(v8::Global<v8::Promise>),
+        }
+
+        enum SyncCallError {
+            Runtime(RuntimeError),
+            Js(JsError),
+        }
+
+        let call_outcome: Result<SyncCallOutcome, SyncCallError> = (|| {
+            let scope = &mut self.js_runtime.handle_scope();
+            let mut try_catch = v8::TryCatch::new(scope);
+
+            let (func, receiver) = {
+                let registry = self.fn_registry.borrow();
+                let stored = registry.get(&fn_id).unwrap();
+                let func = v8::Local::new(&mut try_catch, &stored.function);
+                let receiver = stored
+                    .receiver
+                    .as_ref()
+                    .map(|recv| v8::Local::new(&mut try_catch, recv));
+                (func, receiver)
+            };
+
+            let mut v8_args = Vec::with_capacity(args.len());
+            for arg in &args {
+                let v8_val =
+                    RuntimeCoreState::js_value_to_v8(&self.fn_registry, &mut try_catch, arg)
+                        .map_err(SyncCallError::Runtime)?;
+                v8_args.push(v8_val);
+            }
+
+            let call_receiver = receiver.unwrap_or_else(|| {
+                try_catch
+                    .get_current_context()
+                    .global(&mut try_catch)
+                    .into()
+            });
+
+            match func.call(&mut try_catch, call_receiver, &v8_args) {
+                Some(result_value) => {
+                    try_catch.perform_microtask_checkpoint();
+
+                    if result_value.is_promise() {
+                        let promise =
+                            v8::Local::<v8::Promise>::try_from(result_value).map_err(|_| {
+                                SyncCallError::Runtime(RuntimeError::internal(
+                                    "Failed to cast to Promise",
+                                ))
+                            })?;
+
+                        match promise.state() {
+                            v8::PromiseState::Pending => {
+                                let promise_global = v8::Global::new(&mut try_catch, promise);
+                                Ok(SyncCallOutcome::Pending(promise_global))
+                            }
+                            v8::PromiseState::Fulfilled => {
+                                let fulfilled_value = promise.result(&mut try_catch);
+                                RuntimeCoreState::value_to_js_value(
+                                    &self.fn_registry,
+                                    &self.next_fn_id,
+                                    &mut try_catch,
+                                    fulfilled_value,
+                                )
+                                .map(SyncCallOutcome::Immediate)
+                                .map_err(SyncCallError::Runtime)
+                            }
+                            v8::PromiseState::Rejected => {
+                                let exception = promise.result(&mut try_catch);
+                                let js_error =
+                                    JsError::from_v8_exception(&mut try_catch, exception);
+                                Err(SyncCallError::Js(*js_error))
+                            }
+                        }
+                    } else {
+                        RuntimeCoreState::value_to_js_value(
+                            &self.fn_registry,
+                            &self.next_fn_id,
+                            &mut try_catch,
+                            result_value,
+                        )
+                        .map(SyncCallOutcome::Immediate)
+                        .map_err(SyncCallError::Runtime)
+                    }
+                }
+                None => match try_catch.exception() {
+                    Some(exception) => {
+                        let js_error = JsError::from_v8_exception(&mut try_catch, exception);
+                        Err(SyncCallError::Js(*js_error))
+                    }
+                    None => Err(SyncCallError::Runtime(RuntimeError::internal(
+                        "Function call failed with no exception",
+                    ))),
+                },
+            }
+        })();
+
+        match call_outcome {
+            Ok(SyncCallOutcome::Immediate(value)) => Ok(FunctionCallResult::Immediate(value)),
+            Ok(SyncCallOutcome::Pending(promise)) => {
+                let call_id =
+                    self.store_pending_call(promise, start_time, deadline, effective_timeout);
+                Ok(FunctionCallResult::Pending { call_id })
+            }
+            Err(SyncCallError::Runtime(err)) => Err(err),
+            Err(SyncCallError::Js(js_error)) => Err(self.translate_js_error(js_error)),
+        }
     }
 
     /// Remove a function from the registry, freeing its V8 global handle.

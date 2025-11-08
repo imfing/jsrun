@@ -10,6 +10,7 @@ pub enum RuntimeCallKind {
     EvalModuleSync,
     EvalModuleAsync,
     CallFunctionAsync,
+    CallFunctionSync,
 }
 
 impl RuntimeCallKind {
@@ -20,6 +21,7 @@ impl RuntimeCallKind {
             RuntimeCallKind::EvalModuleSync => "eval_module_sync",
             RuntimeCallKind::EvalModuleAsync => "eval_module_async",
             RuntimeCallKind::CallFunctionAsync => "call_function_async",
+            RuntimeCallKind::CallFunctionSync => "call_function_sync",
         }
     }
 }
@@ -31,6 +33,7 @@ pub struct RuntimeExecutionCounters {
     pub eval_module_sync_count: u64,
     pub eval_module_async_count: u64,
     pub call_function_async_count: u64,
+    pub call_function_sync_count: u64,
 }
 
 impl RuntimeExecutionCounters {
@@ -50,6 +53,9 @@ impl RuntimeExecutionCounters {
             }
             RuntimeCallKind::CallFunctionAsync => {
                 self.call_function_async_count = self.call_function_async_count.saturating_add(1)
+            }
+            RuntimeCallKind::CallFunctionSync => {
+                self.call_function_sync_count = self.call_function_sync_count.saturating_add(1)
             }
         }
     }
@@ -142,6 +148,7 @@ pub struct RuntimeStatsSnapshot {
     pub eval_module_sync_count: u64,
     pub eval_module_async_count: u64,
     pub call_function_async_count: u64,
+    pub call_function_sync_count: u64,
     pub active_async_ops: u64,
     pub open_resources: u64,
     pub active_timers: u64,
@@ -173,6 +180,7 @@ impl RuntimeStatsSnapshot {
             eval_module_sync_count: execution.counters.eval_module_sync_count,
             eval_module_async_count: execution.counters.eval_module_async_count,
             call_function_async_count: execution.counters.call_function_async_count,
+            call_function_sync_count: execution.counters.call_function_sync_count,
             active_async_ops: activity.active_async_ops,
             open_resources: activity.open_resources,
             active_timers: activity.active_timers,

@@ -74,16 +74,25 @@ class TestRuntimeStats:
             assert after_async.total_execution_time_ms >= before.total_execution_time_ms
 
             js_fn = runtime.eval("(a, b) => a + b")
-            result = await js_fn(4, 6)
+            result = js_fn(4, 6)
             assert result == 10
 
             after_call = runtime.get_stats()
             assert (
-                after_call.call_function_async_count
-                == after_async.call_function_async_count + 1
+                after_call.call_function_sync_count
+                == after_async.call_function_sync_count + 1
+            )
+
+            async_fn = runtime.eval("async (value) => value * 2")
+            assert await async_fn.call_async(5) == 10
+
+            final_stats = runtime.get_stats()
+            assert (
+                final_stats.call_function_async_count
+                == after_call.call_function_async_count + 1
             )
             assert (
-                after_call.total_execution_time_ms
+                final_stats.total_execution_time_ms
                 >= after_async.total_execution_time_ms
             )
         finally:
@@ -452,12 +461,11 @@ class TestRuntimeConversions:
             assert isinstance(result, bytes)
             assert result == b"\x01\x02\x03\x04"
 
-    @pytest.mark.asyncio
-    async def test_bytes_round_trip(self):
+    def test_bytes_round_trip(self):
         runtime = Runtime()
         try:
             echo = runtime.eval("(input) => input")
-            result = await echo(b"\x00\xff")
+            result = echo(b"\x00\xff")
             assert isinstance(result, bytes)
             assert result == b"\x00\xff"
         finally:
@@ -471,13 +479,12 @@ class TestRuntimeConversions:
             assert result == expected
             assert result.tzinfo == timezone.utc
 
-    @pytest.mark.asyncio
-    async def test_python_datetime_to_js_date(self):
+    def test_python_datetime_to_js_date(self):
         runtime = Runtime()
         try:
             millis = runtime.eval("(value) => value.getTime()")
             dt = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
-            result = await millis(dt)
+            result = millis(dt)
             assert result == int(dt.timestamp() * 1000)
         finally:
             runtime.close()
@@ -488,12 +495,11 @@ class TestRuntimeConversions:
             assert isinstance(result, set)
             assert result == {1, 2, 3, 4}
 
-    @pytest.mark.asyncio
-    async def test_python_set_to_js_set(self):
+    def test_python_set_to_js_set(self):
         runtime = Runtime()
         try:
             to_array = runtime.eval("(value) => Array.from(value)")
-            result = await to_array({3, 1, 2})
+            result = to_array({3, 1, 2})
             assert isinstance(result, list)
             assert set(result) == {1, 2, 3}
         finally:
@@ -506,12 +512,11 @@ class TestRuntimeConversions:
             assert result is undefined
             assert bool(result) is False
 
-    @pytest.mark.asyncio
-    async def test_python_undefined_to_js(self):
+    def test_python_undefined_to_js(self):
         runtime = Runtime()
         try:
             check = runtime.eval("(value) => value === undefined")
-            result = await check(undefined)
+            result = check(undefined)
             assert result is True
         finally:
             runtime.close()
@@ -522,14 +527,13 @@ class TestRuntimeConversions:
             assert isinstance(result, int)
             assert result == 2**200
 
-    @pytest.mark.asyncio
-    async def test_python_int_to_js_bigint(self):
+    def test_python_int_to_js_bigint(self):
         runtime = Runtime()
         try:
             check = runtime.eval(
                 "(value) => (typeof value === 'bigint') && value === 2n ** 200n"
             )
-            result = await check(2**200)
+            result = check(2**200)
             assert result is True
         finally:
             runtime.close()
@@ -725,7 +729,7 @@ class TestRuntimeAsync:
         with Runtime() as runtime:
             js_func = await runtime.eval_async("Promise.resolve((value) => value + 5)")
             assert isinstance(js_func, JsFunction)
-            assert await js_func(37) == 42
+            assert js_func(37) == 42
 
     @pytest.mark.asyncio
     async def test_eval_async_promise_rejection(self):
