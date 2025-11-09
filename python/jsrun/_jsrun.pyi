@@ -6,6 +6,7 @@ import types
 from datetime import timedelta
 from typing import (
     Any,
+    AsyncIterable,
     Awaitable,
     Callable,
     Mapping,
@@ -24,6 +25,7 @@ __all__ = [
     "RuntimeConfig",
     "RuntimeStats",
     "JsFunction",
+    "JsStream",
     "JsUndefined",
     "RuntimeTerminated",
     "undefined",
@@ -231,6 +233,12 @@ class RuntimeStats:
     open_resources: int
     active_timers: int
     active_intervals: int
+    active_js_streams: int
+    active_py_streams: int
+    total_js_streams: int
+    total_py_streams: int
+    bytes_streamed_js_to_py: int
+    bytes_streamed_py_to_js: int
 
     def __repr__(self) -> str: ...
 
@@ -293,6 +301,36 @@ class JsFunction:
         """
         ...
 
+    def __repr__(self) -> str: ...
+
+class JsStream:
+    """
+    Async iterator proxy for a JavaScript ``ReadableStream`` returned from the runtime.
+    """
+
+    def __aiter__(self) -> Self: ...
+    def __anext__(self) -> Awaitable[Any]:
+        """
+        Await and return the next chunk yielded by the underlying JS stream.
+
+        Raises:
+            StopAsyncIteration: When the stream finishes.
+            JavaScriptError: If the stream reader errors.
+        """
+        ...
+
+    def close(self) -> None:
+        """Cancel the stream and release its runtime resources."""
+        ...
+
+    def __repr__(self) -> str: ...
+
+class PyStreamSource:
+    """
+    Handle that exposes a Python async iterable to JavaScript as a ``ReadableStream``.
+    """
+
+    def close(self) -> None: ...
     def __repr__(self) -> str: ...
 
 class JsUndefined:
@@ -526,6 +564,20 @@ class Runtime:
             >>> runtime.bind_function("add", add)
             >>> runtime.eval("add(1, 2)")
             3
+        """
+        ...
+
+    def stream_from_async_iterable(
+        self, iterable: AsyncIterable[Any]
+    ) -> PyStreamSource:
+        """
+        Wrap a Python async iterable and expose it to JavaScript as a ``ReadableStream``.
+
+        Args:
+            iterable: Object implementing ``__aiter__`` that yields JSON-serializable chunks.
+
+        Returns:
+            Handle that can be passed into JavaScript and consumed via stream readers.
         """
         ...
 

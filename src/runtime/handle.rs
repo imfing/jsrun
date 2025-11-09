@@ -9,9 +9,10 @@ use crate::runtime::runner::{
     spawn_runtime_thread, FunctionCallResult, RuntimeCommand, TerminationController,
 };
 use crate::runtime::stats::RuntimeStatsSnapshot;
+use crate::runtime::stream::{PyStreamRegistry, StreamChunk};
 use pyo3::prelude::Py;
 use pyo3::PyAny;
-use pyo3_async_runtimes::TaskLocals;
+use pyo3_async_runtimes::{tokio as pyo3_tokio, TaskLocals};
 use std::collections::HashSet;
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -27,26 +28,44 @@ pub struct RuntimeHandle {
     shutdown: Arc<Mutex<bool>>,
     termination: TerminationController,
     tracked_functions: Arc<Mutex<HashSet<u32>>>,
+    tracked_js_streams: Arc<Mutex<HashSet<u32>>>,
+    tracked_py_streams: Arc<Mutex<HashSet<u32>>>,
     inspector_metadata: Arc<Mutex<Option<InspectorMetadata>>>,
     inspector_connection: Option<InspectorConnectionState>,
     serialization_limits: SerializationLimits,
+    py_stream_registry: PyStreamRegistry,
 }
 
 impl RuntimeHandle {
     pub fn spawn(config: RuntimeConfig) -> RuntimeResult<Self> {
         let serialization_limits = config.serialization_limits();
-        let (tx, termination, inspector_info) = spawn_runtime_thread(config)?;
+        let (tx, termination, inspector_info, py_stream_registry) = spawn_runtime_thread(config)?;
         let (metadata, connection) = inspector_info
             .map(|(meta, state)| (Some(meta), Some(state)))
             .unwrap_or((None, None));
+        let tracked_functions = Arc::new(Mutex::new(HashSet::new()));
+        let tracked_js_streams = Arc::new(Mutex::new(HashSet::new()));
+        let tracked_py_streams = Arc::new(Mutex::new(HashSet::new()));
+        {
+            let tracked = Arc::downgrade(&tracked_py_streams);
+            py_stream_registry.add_release_listener(move |stream_id| {
+                if let Some(set) = tracked.upgrade() {
+                    let mut guard = set.lock().unwrap();
+                    guard.remove(&stream_id);
+                }
+            });
+        }
         Ok(Self {
             tx: Some(tx),
             shutdown: Arc::new(Mutex::new(false)),
             termination,
-            tracked_functions: Arc::new(Mutex::new(HashSet::new())),
+            tracked_functions,
+            tracked_js_streams,
+            tracked_py_streams,
             inspector_metadata: Arc::new(Mutex::new(metadata)),
             inspector_connection: connection,
             serialization_limits,
+            py_stream_registry,
         })
     }
 
@@ -319,6 +338,90 @@ impl RuntimeHandle {
             .map_err(|_| RuntimeError::internal("Failed to receive release result"))?
     }
 
+    pub async fn stream_read(&self, stream_id: u32) -> RuntimeResult<StreamChunk> {
+        let sender = self.sender()?.clone();
+        let (result_tx, result_rx) = oneshot::channel();
+
+        sender
+            .send(RuntimeCommand::StreamRead {
+                stream_id,
+                responder: result_tx,
+            })
+            .map_err(|_| RuntimeError::internal("Failed to send stream_read command"))?;
+
+        let chunk_value = result_rx
+            .await
+            .map_err(|_| RuntimeError::internal("Failed to receive stream chunk"))??;
+        let chunk = StreamChunk::from_js_value(chunk_value)?;
+        if chunk.done {
+            self.untrack_js_stream_id(stream_id);
+        }
+        Ok(chunk)
+    }
+
+    pub fn stream_release(&self, stream_id: u32) -> RuntimeResult<()> {
+        let sender = self.sender()?.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        sender
+            .send(RuntimeCommand::StreamRelease {
+                stream_id,
+                responder: result_tx,
+            })
+            .map_err(|_| RuntimeError::internal("Failed to send stream_release command"))?;
+
+        result_rx
+            .recv()
+            .map_err(|_| RuntimeError::internal("Failed to receive stream_release result"))??;
+        self.untrack_js_stream_id(stream_id);
+        Ok(())
+    }
+
+    pub fn stream_cancel(&self, stream_id: u32) -> RuntimeResult<()> {
+        let sender = self.sender()?.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        sender
+            .send(RuntimeCommand::StreamCancel {
+                stream_id,
+                responder: result_tx,
+            })
+            .map_err(|_| RuntimeError::internal("Failed to send stream_cancel command"))?;
+
+        result_rx
+            .recv()
+            .map_err(|_| RuntimeError::internal("Failed to receive stream_cancel result"))??;
+        self.untrack_js_stream_id(stream_id);
+        Ok(())
+    }
+
+    pub fn register_py_stream(
+        &self,
+        iterable: Py<PyAny>,
+        task_locals: TaskLocals,
+    ) -> RuntimeResult<u32> {
+        let stream_id = self
+            .py_stream_registry
+            .register_iterable(iterable, task_locals)?;
+        self.track_py_stream_id(stream_id);
+        Ok(stream_id)
+    }
+
+    pub fn cancel_py_stream_async(&self, stream_id: u32) {
+        let registry = self.py_stream_registry.clone();
+        pyo3_tokio::get_runtime().spawn(async move {
+            if let Err(err) = registry.cancel(stream_id).await {
+                log::debug!("PyStream cancellation for id {} failed: {}", stream_id, err);
+            }
+        });
+        self.untrack_py_stream_id(stream_id);
+    }
+
+    pub fn release_py_stream(&self, stream_id: u32) {
+        self.py_stream_registry.release(stream_id);
+        self.untrack_py_stream_id(stream_id);
+    }
+
     pub fn get_stats(&self) -> RuntimeResult<RuntimeStatsSnapshot> {
         let sender = self.sender()?.clone();
         let (result_tx, result_rx) = mpsc::channel();
@@ -435,6 +538,36 @@ impl RuntimeHandle {
 
     pub fn drain_tracked_function_ids(&self) -> Vec<u32> {
         let mut set = self.tracked_functions.lock().unwrap();
+        set.drain().collect()
+    }
+
+    pub fn track_js_stream_id(&self, stream_id: u32) {
+        let mut set = self.tracked_js_streams.lock().unwrap();
+        set.insert(stream_id);
+    }
+
+    pub fn untrack_js_stream_id(&self, stream_id: u32) {
+        let mut set = self.tracked_js_streams.lock().unwrap();
+        set.remove(&stream_id);
+    }
+
+    pub fn drain_tracked_js_stream_ids(&self) -> Vec<u32> {
+        let mut set = self.tracked_js_streams.lock().unwrap();
+        set.drain().collect()
+    }
+
+    pub fn track_py_stream_id(&self, stream_id: u32) {
+        let mut set = self.tracked_py_streams.lock().unwrap();
+        set.insert(stream_id);
+    }
+
+    pub fn untrack_py_stream_id(&self, stream_id: u32) {
+        let mut set = self.tracked_py_streams.lock().unwrap();
+        set.remove(&stream_id);
+    }
+
+    pub fn drain_tracked_py_stream_ids(&self) -> Vec<u32> {
+        let mut set = self.tracked_py_streams.lock().unwrap();
         set.drain().collect()
     }
 

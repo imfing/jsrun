@@ -9,10 +9,14 @@ mod runtime;
 fn _jsrun(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<runtime::python::Runtime>()?;
     m.add_class::<runtime::python::JsFunction>()?;
+    m.add_class::<runtime::python::JsStream>()?;
     m.add_class::<runtime::python::JsUndefined>()?;
     m.add_class::<runtime::python::RuntimeStats>()?;
     m.add_class::<runtime::python::InspectorEndpoints>()?;
     m.add_class::<runtime::python::JsFunctionFinalizer>()?;
+    m.add_class::<runtime::python::JsStreamFinalizer>()?;
+    m.add_class::<runtime::python::PyStreamSource>()?;
+    m.add_class::<runtime::python::PyStreamFinalizer>()?;
     m.add_class::<runtime::python::SnapshotBuilderPy>()?;
     m.add_class::<runtime::RuntimeConfig>()?;
     m.add_class::<runtime::config::InspectorConfig>()?;

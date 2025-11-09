@@ -46,6 +46,9 @@ const SET_TYPE: &str = "Set";
 const SET_VALUES_KEY: &str = "values";
 const BIGINT_TYPE: &str = "BigInt";
 const BIGINT_VALUE_KEY: &str = "value";
+const JS_STREAM_TYPE: &str = "JsStream";
+const PY_STREAM_TYPE: &str = "PyStream";
+const STREAM_ID_KEY: &str = "id";
 
 /// Internal representation of JavaScript values that can round-trip accurately.
 ///
@@ -82,6 +85,10 @@ pub enum JSValue {
     Set(Vec<JSValue>),
     /// JavaScript function (proxy via registry ID)
     Function { id: u32 },
+    /// JavaScript ReadableStream (proxied via runtime stream registry)
+    JsStream { id: u32 },
+    /// Python async iterable placeholder forwarded into JavaScript
+    PyStream { id: u32 },
 }
 
 impl JSValue {}
@@ -129,6 +136,18 @@ impl Serialize for JSValue {
                 "Cannot serialize JSValue::Function (id: {}). Functions must be called, not serialized.",
                 id
             ))),
+            JSValue::JsStream { id } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry(TYPE_TAG, JS_STREAM_TYPE)?;
+                map.serialize_entry(STREAM_ID_KEY, id)?;
+                map.end()
+            }
+            JSValue::PyStream { id } => {
+                let mut map = serializer.serialize_map(Some(2))?;
+                map.serialize_entry(TYPE_TAG, PY_STREAM_TYPE)?;
+                map.serialize_entry(STREAM_ID_KEY, id)?;
+                map.end()
+            }
         }
     }
 }
@@ -269,6 +288,36 @@ impl<'de> Deserialize<'de> for JSValue {
                                         )));
                                     }
                                 }
+                            }
+                        }
+                        JS_STREAM_TYPE => {
+                            if let Some(entry) = object.get(STREAM_ID_KEY) {
+                                let id = match entry {
+                                    JSValue::Int(v) if *v >= 0 => *v as u32,
+                                    JSValue::Float(f) if f.is_finite() && *f >= 0.0 => *f as u32,
+                                    other => {
+                                        return Err(de::Error::custom(format!(
+                                            "Invalid JsStream id payload: {:?}",
+                                            other
+                                        )))
+                                    }
+                                };
+                                return Ok(JSValue::JsStream { id });
+                            }
+                        }
+                        PY_STREAM_TYPE => {
+                            if let Some(entry) = object.get(STREAM_ID_KEY) {
+                                let id = match entry {
+                                    JSValue::Int(v) if *v >= 0 => *v as u32,
+                                    JSValue::Float(f) if f.is_finite() && *f >= 0.0 => *f as u32,
+                                    other => {
+                                        return Err(de::Error::custom(format!(
+                                            "Invalid PyStream id payload: {:?}",
+                                            other
+                                        )))
+                                    }
+                                };
+                                return Ok(JSValue::PyStream { id });
                             }
                         }
                         _ => {}

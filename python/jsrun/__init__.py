@@ -14,6 +14,7 @@ from ._jsrun import (
     InspectorEndpoints,
     JavaScriptError,
     JsFunction,
+    JsStream,
     JsUndefined,
     Runtime,
     RuntimeConfig,
@@ -251,4 +252,5 @@ __all__ = [
     "JavaScriptError",
     "RuntimeTerminated",
     "undefined",
+    "JsStream",
 ]

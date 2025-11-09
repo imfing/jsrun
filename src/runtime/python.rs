@@ -11,12 +11,14 @@ use super::runner::{self, FunctionCallResult};
 use super::snapshot::{SnapshotBuilder, SnapshotBuilderConfig};
 use super::stats::{RuntimeCallKind, RuntimeStatsSnapshot};
 use pyo3::create_exception;
-use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyException, PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::BoundObject;
 use pyo3_async_runtimes::{tokio as pyo3_tokio, TaskLocals};
 use std::future::Future;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
@@ -514,6 +516,18 @@ pub struct RuntimeStats {
     active_timers: u64,
     #[pyo3(get)]
     active_intervals: u64,
+    #[pyo3(get)]
+    active_js_streams: u64,
+    #[pyo3(get)]
+    active_py_streams: u64,
+    #[pyo3(get)]
+    total_js_streams: u64,
+    #[pyo3(get)]
+    total_py_streams: u64,
+    #[pyo3(get)]
+    bytes_streamed_js_to_py: u64,
+    #[pyo3(get)]
+    bytes_streamed_py_to_js: u64,
 }
 
 impl RuntimeStats {
@@ -538,6 +552,12 @@ impl RuntimeStats {
             open_resources: snapshot.open_resources,
             active_timers: snapshot.active_timers,
             active_intervals: snapshot.active_intervals,
+            active_js_streams: snapshot.active_js_streams,
+            active_py_streams: snapshot.active_py_streams,
+            total_js_streams: snapshot.total_js_streams,
+            total_py_streams: snapshot.total_py_streams,
+            bytes_streamed_js_to_py: snapshot.bytes_streamed_js_to_py,
+            bytes_streamed_py_to_js: snapshot.bytes_streamed_py_to_js,
         }
     }
 }
@@ -546,7 +566,7 @@ impl RuntimeStats {
 impl RuntimeStats {
     fn __repr__(&self) -> String {
         format!(
-            "RuntimeStats(heap_used_bytes={}, total_execution_time_ms={}, last_execution_kind={}, active_async_ops={}, open_resources={}, eval_sync_count={}, call_function_async_count={}, call_function_sync_count={})",
+            "RuntimeStats(heap_used_bytes={}, total_execution_time_ms={}, last_execution_kind={}, active_async_ops={}, open_resources={}, eval_sync_count={}, call_function_async_count={}, call_function_sync_count={}, active_js_streams={}, active_py_streams={})",
             self.heap_used_bytes,
             self.total_execution_time_ms,
             self.last_execution_kind
@@ -556,7 +576,9 @@ impl RuntimeStats {
             self.open_resources,
             self.eval_sync_count,
             self.call_function_async_count,
-            self.call_function_sync_count
+            self.call_function_sync_count,
+            self.active_js_streams,
+            self.active_py_streams
         )
     }
 }
@@ -709,6 +731,8 @@ fn js_value_to_js_expression(value: &JSValue) -> PyResult<String> {
         JSValue::Function { .. } => Err(PyRuntimeError::new_err(
             "Cannot serialize function values; use callables directly",
         )),
+        JSValue::JsStream { id } => Ok(format!("/* JsStream({id}) */ undefined")),
+        JSValue::PyStream { id } => Ok(format!("/* PyStream({id}) */ undefined")),
     }
 }
 
@@ -812,6 +836,21 @@ impl Runtime {
     fn close(&self) -> PyResult<()> {
         let mut handle = self.handle.borrow_mut();
         if let Some(mut runtime) = handle.take() {
+            for stream_id in runtime.drain_tracked_js_stream_ids() {
+                if runtime.is_shutdown() {
+                    break;
+                }
+                if let Err(err) = runtime.stream_release(stream_id) {
+                    log::debug!(
+                        "Runtime.close failed to release stream id {}: {}",
+                        stream_id,
+                        err
+                    );
+                }
+            }
+            for stream_id in runtime.drain_tracked_py_stream_ids() {
+                runtime.cancel_py_stream_async(stream_id);
+            }
             for fn_id in runtime.drain_tracked_function_ids() {
                 if runtime.is_shutdown() {
                     break;
@@ -902,6 +941,22 @@ impl Runtime {
         // Execute the binding script; ignore the return value ("undefined").
         let _ = self.eval(py, script.as_str())?;
         Ok(())
+    }
+
+    #[pyo3(signature = (iterable))]
+    fn stream_from_async_iterable(
+        &self,
+        py: Python<'_>,
+        iterable: Py<PyAny>,
+    ) -> PyResult<Py<PyStreamSource>> {
+        let handle = self
+            .handle
+            .borrow()
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Runtime has been closed"))?
+            .clone();
+
+        PyStreamSource::new(py, handle, iterable)
     }
 
     #[pyo3(signature = (name, obj))]
@@ -1306,7 +1361,8 @@ impl JsFunction {
             result
         };
 
-        pyo3_tokio::future_into_py(py, future)
+        let py_future = pyo3_tokio::future_into_py(py, future)?;
+        Ok(py_future.into_bound())
     }
 
     /// String representation of the function.
@@ -1354,6 +1410,261 @@ impl JsFunctionFinalizer {
                 );
             }
             runtime_handle.untrack_function_id(self.fn_id);
+        }
+    }
+}
+
+struct StreamSharedState {
+    handle: Mutex<Option<RuntimeHandle>>,
+    stream_id: u32,
+    closed: AtomicBool,
+}
+
+impl StreamSharedState {
+    fn new(handle: RuntimeHandle, stream_id: u32) -> Self {
+        Self {
+            handle: Mutex::new(Some(handle)),
+            stream_id,
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    fn stream_id(&self) -> u32 {
+        self.stream_id
+    }
+
+    fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn mark_remote_closed(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.handle.lock().unwrap().take();
+    }
+
+    fn cancel(&self) {
+        if self.closed.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            if let Err(err) = handle.stream_cancel(self.stream_id) {
+                log::debug!(
+                    "JsStream cancel failed for stream id {}: {}",
+                    self.stream_id,
+                    err
+                );
+            }
+        }
+    }
+}
+
+#[pyclass(unsendable, weakref)]
+pub struct JsStream {
+    state: Arc<StreamSharedState>,
+}
+
+impl JsStream {
+    pub fn new(py: Python<'_>, handle: RuntimeHandle, stream_id: u32) -> PyResult<Py<Self>> {
+        handle.track_js_stream_id(stream_id);
+        let state = Arc::new(StreamSharedState::new(handle.clone(), stream_id));
+        let instance = Self {
+            state: state.clone(),
+        };
+        let py_obj = Py::new(py, instance)?;
+        Self::attach_finalizer(py, &py_obj, state)?;
+        Ok(py_obj)
+    }
+
+    fn attach_finalizer(
+        py: Python<'_>,
+        py_obj: &Py<Self>,
+        state: Arc<StreamSharedState>,
+    ) -> PyResult<()> {
+        let weakref = py.import("weakref")?;
+        let finalize = weakref.getattr(pyo3::intern!(py, "finalize"))?;
+        let finalizer = Py::new(py, JsStreamFinalizer::new(state))?;
+        finalize.call1((py_obj.clone_ref(py), finalizer))?;
+        Ok(())
+    }
+
+    fn cancel_with_runtime(&self) {
+        self.state.cancel();
+    }
+}
+
+#[pymethods]
+impl JsStream {
+    fn __aiter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __anext__<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        if slf.state.is_closed() {
+            return Err(PyErr::new::<PyStopAsyncIteration, _>("Stream closed"));
+        }
+
+        let handle = slf
+            .state
+            .handle
+            .lock()
+            .unwrap()
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Runtime has been shut down"))?
+            .clone();
+        let stream_id = slf.state.stream_id();
+        let state = slf.state.clone();
+        let handle_for_conversion = handle.clone();
+        let future = async move {
+            match handle.stream_read(stream_id).await {
+                Ok(mut chunk) => {
+                    if chunk.done {
+                        state.mark_remote_closed();
+                        Err(PyErr::new::<PyStopAsyncIteration, _>(""))
+                    } else {
+                        let chunk_value = chunk.value.take();
+                        let py_value = Python::attach(|py| match chunk_value {
+                            Some(value) => {
+                                js_value_to_python(py, &value, Some(&handle_for_conversion))
+                            }
+                            None => Ok(py.None()),
+                        })?;
+                        Ok(py_value)
+                    }
+                }
+                Err(err) => Err(runtime_error_to_py(err)),
+            }
+        };
+
+        pyo3_tokio::future_into_py(py, future)
+    }
+
+    fn close(&self) -> PyResult<()> {
+        self.cancel_with_runtime();
+        Ok(())
+    }
+
+    fn __repr__(&self) -> String {
+        let stream_id = self.state.stream_id();
+        if self.state.is_closed() {
+            "<JsStream (closed)>".to_string()
+        } else {
+            format!("<JsStream id={}>", stream_id)
+        }
+    }
+}
+
+#[pyclass(module = "_jsrun", name = "_JsStreamFinalizer", unsendable)]
+pub(crate) struct JsStreamFinalizer {
+    state: Arc<StreamSharedState>,
+}
+
+impl JsStreamFinalizer {
+    fn new(state: Arc<StreamSharedState>) -> Self {
+        Self { state }
+    }
+}
+
+#[pymethods]
+impl JsStreamFinalizer {
+    fn __call__(&self) {
+        self.state.cancel();
+    }
+}
+
+#[pyclass(module = "_jsrun", unsendable, weakref)]
+pub struct PyStreamSource {
+    handle: std::cell::RefCell<Option<RuntimeHandle>>,
+    stream_id: u32,
+    closed: std::cell::Cell<bool>,
+}
+
+impl PyStreamSource {
+    pub fn new(py: Python<'_>, handle: RuntimeHandle, iterable: Py<PyAny>) -> PyResult<Py<Self>> {
+        let task_locals = pyo3_tokio::get_current_locals(py)?;
+        let stream_id = handle
+            .register_py_stream(iterable, task_locals)
+            .map_err(|e| runtime_error_with_context("Stream registration failed", e))?;
+        let finalizer_handle = handle.clone();
+        let instance = Self {
+            handle: std::cell::RefCell::new(Some(handle)),
+            stream_id,
+            closed: std::cell::Cell::new(false),
+        };
+        let py_obj = Py::new(py, instance)?;
+        Self::attach_finalizer(py, &py_obj, finalizer_handle, stream_id)?;
+        Ok(py_obj)
+    }
+
+    fn attach_finalizer(
+        py: Python<'_>,
+        py_obj: &Py<Self>,
+        handle: RuntimeHandle,
+        stream_id: u32,
+    ) -> PyResult<()> {
+        let weakref = py.import("weakref")?;
+        let finalize = weakref.getattr(pyo3::intern!(py, "finalize"))?;
+        let finalizer = Py::new(py, PyStreamFinalizer::new(handle, stream_id))?;
+        finalize.call1((py_obj.clone_ref(py), finalizer))?;
+        Ok(())
+    }
+
+    pub(crate) fn stream_id_for_transfer(&self) -> PyResult<u32> {
+        if self.closed.get() {
+            return Err(PyRuntimeError::new_err("Stream has been closed"));
+        }
+        if self.handle.borrow().is_none() {
+            return Err(PyRuntimeError::new_err("Runtime has been shut down"));
+        }
+        Ok(self.stream_id)
+    }
+
+    fn mark_closed(&self) {
+        if self.closed.replace(true) {
+            return;
+        }
+        if let Some(handle) = self.handle.borrow_mut().take() {
+            handle.cancel_py_stream_async(self.stream_id);
+        }
+    }
+}
+
+#[pymethods]
+impl PyStreamSource {
+    #[pyo3(name = "close")]
+    fn close_py(&self) {
+        self.mark_closed();
+    }
+
+    fn __repr__(&self) -> String {
+        if self.closed.get() {
+            "<PyStreamSource (closed)>".to_string()
+        } else {
+            format!("<PyStreamSource id={}>", self.stream_id)
+        }
+    }
+}
+
+#[pyclass(module = "_jsrun", name = "_PyStreamFinalizer", unsendable)]
+pub(crate) struct PyStreamFinalizer {
+    handle: std::cell::RefCell<Option<RuntimeHandle>>,
+    stream_id: u32,
+}
+
+impl PyStreamFinalizer {
+    fn new(handle: RuntimeHandle, stream_id: u32) -> Self {
+        Self {
+            handle: std::cell::RefCell::new(Some(handle)),
+            stream_id,
+        }
+    }
+}
+
+#[pymethods]
+impl PyStreamFinalizer {
+    fn __call__(&self) {
+        let mut handle = self.handle.borrow_mut();
+        if let Some(runtime_handle) = handle.take() {
+            runtime_handle.cancel_py_stream_async(self.stream_id);
         }
     }
 }

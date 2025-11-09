@@ -1,7 +1,7 @@
 //! Conversion helpers between Python objects and JSValue/serde_json values.
 
 use crate::runtime::js_value::{JSValue, LimitTracker, SerializationLimits};
-use crate::runtime::python::runtime_error_to_py;
+use crate::runtime::python::{runtime_error_to_py, PyStreamSource};
 use indexmap::IndexMap;
 use num_bigint::BigInt;
 use pyo3::conversion::IntoPyObject;
@@ -138,6 +138,16 @@ pub(crate) fn js_value_to_python(
             )?;
             Ok(js_fn.into_any())
         }
+        JSValue::JsStream { id } => {
+            let handle = handle.ok_or_else(|| {
+                PyRuntimeError::new_err("RuntimeHandle required to convert JSValue::JsStream")
+            })?;
+            let js_stream = super::python::JsStream::new(py, handle.clone(), *id)?;
+            Ok(js_stream.into_any())
+        }
+        JSValue::PyStream { .. } => Err(PyRuntimeError::new_err(
+            "PyStream placeholders cannot be materialized on the Python side",
+        )),
     }
 }
 
@@ -184,6 +194,10 @@ fn python_to_js_value_internal(
     {
         add_bytes(0, tracker)?;
         Ok(JSValue::Undefined)
+    } else if let Ok(stream) = obj.extract::<pyo3::PyRef<PyStreamSource>>() {
+        add_bytes(std::mem::size_of::<u32>(), tracker)?;
+        let stream_id = stream.stream_id_for_transfer()?;
+        Ok(JSValue::PyStream { id: stream_id })
     } else if let Ok(py_bytes) = obj.cast::<PyBytes>() {
         let data = py_bytes.as_bytes();
         add_bytes(data.len(), tracker)?;

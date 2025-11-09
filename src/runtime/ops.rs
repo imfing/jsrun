@@ -7,6 +7,7 @@
 
 use crate::runtime::conversion::{js_value_to_python, python_to_js_value};
 use crate::runtime::js_value::{JSValue, SerializationLimits};
+use crate::runtime::stream::PyStreamRegistry;
 use deno_core::ascii_str;
 use deno_core::op2;
 use deno_core::Extension;
@@ -210,6 +211,44 @@ fn op_jsrun_call_python_async(
     })
 }
 
+#[op2(async)]
+#[serde]
+fn op_jsrun_stream_pull_py(
+    state: &mut OpState,
+    #[smi] stream_id: u32,
+) -> Result<impl std::future::Future<Output = Result<JSValue, JsErrorBox>>, JsErrorBox> {
+    let registry = state
+        .try_borrow::<PyStreamRegistry>()
+        .ok_or_else(|| JsErrorBox::type_error("PyStreamRegistry is missing"))?
+        .clone();
+
+    Ok(async move {
+        registry
+            .pull_next(stream_id)
+            .await
+            .map(|chunk| chunk.to_js_value())
+            .map_err(|err| JsErrorBox::type_error(err.to_string()))
+    })
+}
+
+#[op2(async)]
+fn op_jsrun_stream_cancel_py(
+    state: &mut OpState,
+    #[smi] stream_id: u32,
+) -> Result<impl std::future::Future<Output = Result<(), JsErrorBox>>, JsErrorBox> {
+    let registry = state
+        .try_borrow::<PyStreamRegistry>()
+        .ok_or_else(|| JsErrorBox::type_error("PyStreamRegistry is missing"))?
+        .clone();
+
+    Ok(async move {
+        registry
+            .cancel(stream_id)
+            .await
+            .map_err(|err| JsErrorBox::type_error(err.to_string()))
+    })
+}
+
 /// Build the `deno_core::Extension` that wires the Python op registry into the runtime.
 pub fn python_extension(registry: PythonOpRegistry) -> Extension {
     let bridge_code = ascii_str!(
@@ -251,6 +290,16 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
     return value;
   }
 
+  function reviveStreamChunk(entry) {
+    if (!entry || entry.__jsrun_type !== "StreamChunk") {
+      return entry;
+    }
+    return {
+      done: Boolean(entry.done),
+      value: entry.value === undefined ? undefined : revive(entry.value),
+    };
+  }
+
   function revive(value) {
     if (value && typeof value === "object") {
       if (ArrayBuffer.isView(value)) {
@@ -276,6 +325,11 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
         }
         case "BigInt":
           return BigInt(value.value);
+        case "PyStream":
+          if (typeof globalThis.__jsrun_from_py_stream === "function") {
+            return globalThis.__jsrun_from_py_stream(value.id);
+          }
+          return value;
         default: {
           const result = {};
           for (const [key, val] of Object.entries(value)) {
@@ -300,6 +354,98 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
   globalThis.__host_op_async__ = function (opId, ...args) {
     return globalThis.__jsrunCallAsync(opId, ...args);
   };
+
+  if (typeof globalThis.ReadableStream !== "function") {
+    // Note: This minimal polyfill does not implement backpressure or BYOB readers.
+    class JsrunReadableStream {
+      constructor(underlying = {}) {
+        this._queue = [];
+        this._closed = false;
+        this._errored = false;
+        this._error = undefined;
+        this._pulling = false;
+        this._underlying = underlying;
+        this._controller = {
+          enqueue: (value) => {
+            if (this._closed) {
+              return;
+            }
+            this._queue.push(value);
+          },
+          close: () => {
+            this._closed = true;
+          },
+          error: (reason) => {
+            this._errored = true;
+            this._error =
+              reason instanceof Error
+                ? reason
+                : new Error(String(reason ?? "ReadableStream error"));
+            this._closed = true;
+          },
+        };
+        if (typeof underlying.start === "function") {
+          underlying.start(this._controller);
+        }
+      }
+
+      async _maybePull() {
+        if (this._closed || this._pulling) {
+          return;
+        }
+        if (typeof this._underlying.pull === "function") {
+          this._pulling = true;
+          try {
+            await this._underlying.pull(this._controller);
+          } finally {
+            this._pulling = false;
+          }
+        }
+      }
+
+      getReader() {
+        const stream = this;
+        return {
+          async read() {
+            if (stream._queue.length === 0 && !stream._closed) {
+              await stream._maybePull();
+            }
+            if (stream._queue.length > 0) {
+              const value = stream._queue.shift();
+              return { done: false, value };
+            }
+            if (stream._errored) {
+              throw stream._error || new Error("ReadableStream error");
+            }
+            return { done: true, value: undefined };
+          },
+          async cancel(reason) {
+            stream._closed = true;
+            if (typeof stream._underlying.cancel === "function") {
+              await stream._underlying.cancel(reason);
+            }
+          },
+        };
+      }
+    }
+    globalThis.ReadableStream = JsrunReadableStream;
+  }
+
+  globalThis.__jsrun_from_py_stream = function (id) {
+    return new ReadableStream({
+      async pull(controller) {
+        const chunk = reviveStreamChunk(await ops.op_jsrun_stream_pull_py(id));
+        if (chunk.done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(chunk.value);
+      },
+      cancel(reason) {
+        return ops.op_jsrun_stream_cancel_py(id);
+      },
+    });
+  };
 })(globalThis);"#
     );
 
@@ -310,6 +456,8 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
         ops: std::borrow::Cow::Owned(vec![
             op_jsrun_call_python_sync(),
             op_jsrun_call_python_async(),
+            op_jsrun_stream_pull_py(),
+            op_jsrun_stream_cancel_py(),
         ]),
         js_files: std::borrow::Cow::Owned(vec![ExtensionFileSource::new(
             "ext:jsrun/python_bridge.js",

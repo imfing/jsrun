@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::runtime::stream::StreamStatsSnapshot;
 use deno_core::stats::{RuntimeActivity, RuntimeActivitySnapshot};
 
 /// Identifies the JavaScript entry point that was executed.
@@ -153,6 +154,12 @@ pub struct RuntimeStatsSnapshot {
     pub open_resources: u64,
     pub active_timers: u64,
     pub active_intervals: u64,
+    pub active_js_streams: u64,
+    pub active_py_streams: u64,
+    pub total_js_streams: u64,
+    pub total_py_streams: u64,
+    pub bytes_streamed_js_to_py: u64,
+    pub bytes_streamed_py_to_js: u64,
 }
 
 impl RuntimeStatsSnapshot {
@@ -160,6 +167,7 @@ impl RuntimeStatsSnapshot {
         heap: HeapSnapshot,
         execution: ExecutionSnapshot,
         activity: ActivitySummary,
+        streams: StreamStatsSnapshot,
     ) -> Self {
         let total_execution_time_ms = duration_to_u64_ms(execution.total_execution);
         let last_execution_time_ms = execution
@@ -185,6 +193,12 @@ impl RuntimeStatsSnapshot {
             open_resources: activity.open_resources,
             active_timers: activity.active_timers,
             active_intervals: activity.active_intervals,
+            active_js_streams: streams.active_js_streams,
+            active_py_streams: streams.active_py_streams,
+            total_js_streams: streams.total_js_streams,
+            total_py_streams: streams.total_py_streams,
+            bytes_streamed_js_to_py: streams.bytes_streamed_js_to_py,
+            bytes_streamed_py_to_js: streams.bytes_streamed_py_to_js,
         }
     }
 }
@@ -217,5 +231,11 @@ mod tests {
         assert_eq!(snapshot.last_execution, Some(Duration::from_millis(25)));
         assert_eq!(snapshot.counters.eval_sync_count, 1);
         assert_eq!(snapshot.counters.eval_async_count, 1);
+
+        let heap = HeapSnapshot::default();
+        let activity = ActivitySummary::default();
+        let streams = StreamStatsSnapshot::default();
+        let snapshot_render = RuntimeStatsSnapshot::new(heap, snapshot, activity, streams);
+        assert_eq!(snapshot_render.active_js_streams, 0);
     }
 }

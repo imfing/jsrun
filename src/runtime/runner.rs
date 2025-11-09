@@ -16,6 +16,7 @@ use crate::runtime::ops::{python_extension, PythonOpMode, PythonOpRegistry};
 use crate::runtime::stats::{
     ActivitySummary, HeapSnapshot, RuntimeCallKind, RuntimeStatsSnapshot, RuntimeStatsState,
 };
+use crate::runtime::stream::{JsStreamRegistry, PyStreamRegistry, StreamChunk};
 use deno_core::error::{CoreError, JsError};
 use deno_core::stats::{RuntimeActivityStatsFactory, RuntimeActivityStatsFilter};
 use deno_core::{v8, JsRuntime, PollEventLoopOptions, RuntimeOptions};
@@ -42,12 +43,14 @@ use tokio::sync::oneshot;
 type RuntimeInitResult = RuntimeResult<(
     TerminationController,
     Option<(InspectorMetadata, InspectorConnectionState)>,
+    PyStreamRegistry,
 )>;
 type InitSignalChannel = (StdSender<RuntimeInitResult>, StdReceiver<RuntimeInitResult>);
 type SpawnRuntimeResult = (
     mpsc::UnboundedSender<RuntimeCommand>,
     TerminationController,
     Option<(InspectorMetadata, InspectorConnectionState)>,
+    PyStreamRegistry,
 );
 
 static ACTIVE_RUNTIME_THREADS: AtomicUsize = AtomicUsize::new(0);
@@ -271,6 +274,18 @@ pub enum RuntimeCommand {
     ReleaseFunction {
         fn_id: u32,
         responder: oneshot::Sender<RuntimeResult<()>>,
+    },
+    StreamRead {
+        stream_id: u32,
+        responder: oneshot::Sender<RuntimeResult<JSValue>>,
+    },
+    StreamRelease {
+        stream_id: u32,
+        responder: Sender<RuntimeResult<()>>,
+    },
+    StreamCancel {
+        stream_id: u32,
+        responder: Sender<RuntimeResult<()>>,
     },
     GetStats {
         responder: Sender<RuntimeResult<RuntimeStatsSnapshot>>,
@@ -653,6 +668,38 @@ impl RuntimeDispatcher {
                 let _ = responder.send(result);
                 false
             }
+            RuntimeCommand::StreamRead {
+                stream_id,
+                responder,
+            } => {
+                if self.core.should_reject_new_work() {
+                    let _ = responder.send(Err(RuntimeError::terminated()));
+                } else {
+                    let job = StreamReadJob::new(stream_id, responder);
+                    if self.active_job.is_none() {
+                        self.active_job = Some(Box::new(job));
+                    } else {
+                        self.pending_jobs.push_back(Box::new(job));
+                    }
+                }
+                false
+            }
+            RuntimeCommand::StreamRelease {
+                stream_id,
+                responder,
+            } => {
+                let result = self.core.release_js_stream(stream_id);
+                let _ = responder.send(result);
+                false
+            }
+            RuntimeCommand::StreamCancel {
+                stream_id,
+                responder,
+            } => {
+                let result = self.core.cancel_js_stream(stream_id);
+                let _ = responder.send(result);
+                false
+            }
             RuntimeCommand::GetStats { responder } => {
                 let result = self.core.collect_stats();
                 let _ = responder.send(result);
@@ -886,6 +933,7 @@ impl RuntimeJob for EvalAsyncJob {
                         let fn_registry = core.fn_registry.clone();
                         let next_fn_id = core.next_fn_id.clone();
                         let limits = core.serialization_limits;
+                        let stream_registry = core.js_stream_registry.clone();
                         let scope = &mut core.js_runtime.handle_scope();
                         let promise_local: v8::Local<v8::Promise> =
                             v8::Local::new(scope, &*promise);
@@ -896,6 +944,7 @@ impl RuntimeJob for EvalAsyncJob {
                             scope,
                             result_value,
                             limits,
+                            stream_registry,
                         );
                         self.state = EvalAsyncJobState::Done;
                         Poll::Ready(result)
@@ -918,6 +967,120 @@ impl RuntimeJob for EvalAsyncJob {
             }
             EvalAsyncJobState::Done => {
                 Poll::Ready(Err(RuntimeError::internal("Job already completed")))
+            }
+        }
+    }
+
+    fn send_result(self: Box<Self>, result: RuntimeResult<JSValue>) {
+        let _ = self.responder.send(result);
+    }
+
+    fn start_time(&self) -> Instant {
+        self.start_time
+    }
+}
+
+struct StreamReadJob {
+    stream_id: u32,
+    responder: oneshot::Sender<RuntimeResult<JSValue>>,
+    state: StreamReadJobState,
+    start_time: Instant,
+}
+
+enum StreamReadJobState {
+    Init,
+    Waiting { promise: v8::Global<v8::Promise> },
+    Done,
+}
+
+impl StreamReadJob {
+    fn new(stream_id: u32, responder: oneshot::Sender<RuntimeResult<JSValue>>) -> Self {
+        Self {
+            stream_id,
+            responder,
+            state: StreamReadJobState::Init,
+            start_time: Instant::now(),
+        }
+    }
+}
+
+impl RuntimeJob for StreamReadJob {
+    fn kind(&self) -> RuntimeCallKind {
+        RuntimeCallKind::EvalAsync
+    }
+
+    fn poll(&mut self, core: &mut RuntimeCoreState) -> std::task::Poll<RuntimeResult<JSValue>> {
+        use std::task::Poll;
+
+        match &mut self.state {
+            StreamReadJobState::Init => {
+                let promise = {
+                    let scope = &mut core.js_runtime.handle_scope();
+                    core.js_stream_registry.start_read(scope, self.stream_id)
+                };
+
+                match promise {
+                    Ok(promise) => {
+                        self.state = StreamReadJobState::Waiting { promise };
+                        Poll::Pending
+                    }
+                    Err(err) => {
+                        self.state = StreamReadJobState::Done;
+                        Poll::Ready(Err(err))
+                    }
+                }
+            }
+            StreamReadJobState::Waiting { promise } => {
+                let promise_state = {
+                    let scope = &mut core.js_runtime.handle_scope();
+                    let promise_local: v8::Local<v8::Promise> = v8::Local::new(scope, &*promise);
+                    promise_local.state()
+                };
+
+                match promise_state {
+                    v8::PromiseState::Pending => Poll::Pending,
+                    v8::PromiseState::Fulfilled => {
+                        let chunk_js_value = {
+                            let stream_registry = core.js_stream_registry.clone();
+                            let scope = &mut core.js_runtime.handle_scope();
+                            let promise_local: v8::Local<v8::Promise> =
+                                v8::Local::new(scope, &*promise);
+                            let chunk_value = promise_local.result(scope);
+                            let limits = core.serialization_limits;
+                            RuntimeCoreState::value_to_js_value(
+                                &core.fn_registry,
+                                &core.next_fn_id,
+                                scope,
+                                chunk_value,
+                                limits,
+                                stream_registry,
+                            )
+                        }?;
+
+                        let chunk = StreamChunk::from_js_value(chunk_js_value)?;
+                        core.js_stream_registry
+                            .update_stats_after_chunk(self.stream_id, &chunk);
+                        if chunk.done {
+                            core.js_stream_registry.release(self.stream_id);
+                        }
+                        self.state = StreamReadJobState::Done;
+                        Poll::Ready(Ok(chunk.to_js_value()))
+                    }
+                    v8::PromiseState::Rejected => {
+                        let js_error = {
+                            let scope = &mut core.js_runtime.handle_scope();
+                            let promise_local: v8::Local<v8::Promise> =
+                                v8::Local::new(scope, &*promise);
+                            let exception = promise_local.result(scope);
+                            *JsError::from_v8_exception(scope, exception)
+                        };
+                        self.state = StreamReadJobState::Done;
+                        Poll::Ready(Err(core.translate_js_error(js_error)))
+                    }
+                }
+            }
+            StreamReadJobState::Done => {
+                Poll::Ready(Err(RuntimeError::internal("Stream read already completed")))
             }
         }
     }
@@ -1104,6 +1267,7 @@ impl RuntimeJob for EvalModuleAsyncJob {
                             RuntimeError::internal(format!("Failed to get module namespace: {}", e))
                         })?;
 
+                let stream_registry = core.js_stream_registry.clone();
                 let scope = &mut core.js_runtime.handle_scope();
                 let local = deno_core::v8::Local::new(scope, module_namespace);
                 let value: v8::Local<'_, v8::Value> = local.into();
@@ -1113,6 +1277,7 @@ impl RuntimeJob for EvalModuleAsyncJob {
                     scope,
                     value,
                     limits,
+                    stream_registry,
                 );
 
                 self.state = EvalModuleAsyncJobState::Done;
@@ -1327,6 +1492,7 @@ impl RuntimeJob for CallFunctionAsyncJob {
                         let fn_registry = core.fn_registry.clone();
                         let next_fn_id = core.next_fn_id.clone();
                         let limits = core.serialization_limits;
+                        let stream_registry = core.js_stream_registry.clone();
                         let scope = &mut core.js_runtime.handle_scope();
                         let promise_local: v8::Local<v8::Promise> =
                             v8::Local::new(scope, &*promise);
@@ -1337,6 +1503,7 @@ impl RuntimeJob for CallFunctionAsyncJob {
                             scope,
                             result_value,
                             limits,
+                            stream_registry,
                         );
                         self.state = CallFunctionAsyncJobState::Done;
                         Poll::Ready(result)
@@ -1450,6 +1617,7 @@ impl RuntimeJob for ResumeFunctionCallJob {
                             let fn_registry = core.fn_registry.clone();
                             let next_fn_id = core.next_fn_id.clone();
                             let limits = core.serialization_limits;
+                            let stream_registry = core.js_stream_registry.clone();
                             let scope = &mut core.js_runtime.handle_scope();
                             let promise_local: v8::Local<v8::Promise> =
                                 v8::Local::new(scope, &self.promise);
@@ -1460,6 +1628,7 @@ impl RuntimeJob for ResumeFunctionCallJob {
                                 scope,
                                 result_value,
                                 limits,
+                                stream_registry,
                             );
                             self.state = ResumeFunctionCallJobState::Done;
                             Poll::Ready(result)
@@ -1515,7 +1684,8 @@ pub fn spawn_runtime_thread(config: RuntimeConfig) -> RuntimeResult<SpawnRuntime
                             (Some(meta), Some(state)) => Some((meta, state)),
                             _ => None,
                         };
-                    let _ = init_tx.send(Ok((termination, inspector_info)));
+                    let py_stream_registry = core.py_stream_registry.clone();
+                    let _ = init_tx.send(Ok((termination, inspector_info, py_stream_registry)));
                     core
                 }
                 Err(err) => {
@@ -1532,7 +1702,9 @@ pub fn spawn_runtime_thread(config: RuntimeConfig) -> RuntimeResult<SpawnRuntime
         .map_err(|e| RuntimeError::internal(format!("Failed to spawn runtime thread: {}", e)))?;
 
     match init_rx.recv() {
-        Ok(Ok((termination, inspector_info))) => Ok((cmd_tx, termination, inspector_info)),
+        Ok(Ok((termination, inspector_info, py_stream_registry))) => {
+            Ok((cmd_tx, termination, inspector_info, py_stream_registry))
+        }
         Ok(Err(err)) => Err(err),
         Err(_) => Err(RuntimeError::internal(
             "Runtime thread initialization failed",
@@ -1582,6 +1754,8 @@ struct RuntimeCoreState {
     #[allow(dead_code)]
     startup_snapshot: Option<SnapshotSource>,
     serialization_limits: SerializationLimits,
+    js_stream_registry: Rc<JsStreamRegistry>,
+    py_stream_registry: PyStreamRegistry,
 }
 
 impl RuntimeCoreState {
@@ -1641,6 +1815,14 @@ impl RuntimeCoreState {
             startup_snapshot,
             ..Default::default()
         });
+
+        let js_stream_registry = Rc::new(JsStreamRegistry::new());
+        let py_stream_registry = PyStreamRegistry::new(serialization_limits);
+
+        js_runtime
+            .op_state()
+            .borrow_mut()
+            .put(py_stream_registry.clone());
 
         if inspector_enabled {
             js_runtime.maybe_init_inspector();
@@ -1739,6 +1921,8 @@ impl RuntimeCoreState {
             inspector_state,
             startup_snapshot: snapshot_source,
             serialization_limits,
+            js_stream_registry,
+            py_stream_registry,
         })
     }
 
@@ -1800,6 +1984,34 @@ impl RuntimeCoreState {
                 }
             })
         })
+    }
+
+    fn is_readable_stream(
+        scope: &mut v8::HandleScope<'_>,
+        value: v8::Local<'_, v8::Value>,
+    ) -> bool {
+        if !value.is_object() {
+            return false;
+        }
+
+        let key = match v8::String::new(scope, "ReadableStream") {
+            Some(k) => k,
+            None => return false,
+        };
+        let ctor_value = match scope
+            .get_current_context()
+            .global(scope)
+            .get(scope, key.into())
+        {
+            Some(val) => val,
+            None => return false,
+        };
+        let ctor = match v8::Local::<v8::Function>::try_from(ctor_value) {
+            Ok(func) => func,
+            Err(_) => return false,
+        };
+
+        value.instance_of(scope, ctor.into()).unwrap_or_default()
     }
 
     fn store_pending_call(
@@ -1999,10 +2211,18 @@ impl RuntimeCoreState {
 
             let fn_registry = this.fn_registry.clone();
             let next_fn_id = this.next_fn_id.clone();
+            let limits = this.serialization_limits;
+            let stream_registry = this.js_stream_registry.clone();
             let scope = &mut this.js_runtime.handle_scope();
             let local = deno_core::v8::Local::new(scope, global_value);
-            let limits = this.serialization_limits;
-            Self::value_to_js_value(&fn_registry, &next_fn_id, scope, local, limits)
+            Self::value_to_js_value(
+                &fn_registry,
+                &next_fn_id,
+                scope,
+                local,
+                limits,
+                stream_registry,
+            )
         })
     }
 
@@ -2065,12 +2285,20 @@ impl RuntimeCoreState {
                     })?;
             let fn_registry = this.fn_registry.clone();
             let next_fn_id = this.next_fn_id.clone();
+            let limits = this.serialization_limits;
+            let stream_registry = this.js_stream_registry.clone();
             let scope = &mut this.js_runtime.handle_scope();
             let namespace_obj = deno_core::v8::Local::new(scope, module_namespace);
-            let limits = this.serialization_limits;
             let namespace_value: deno_core::v8::Local<'_, deno_core::v8::Value> =
                 namespace_obj.into();
-            Self::value_to_js_value(&fn_registry, &next_fn_id, scope, namespace_value, limits)
+            Self::value_to_js_value(
+                &fn_registry,
+                &next_fn_id,
+                scope,
+                namespace_value,
+                limits,
+                stream_registry,
+            )
         })
     }
 
@@ -2097,6 +2325,8 @@ impl RuntimeCoreState {
                 fn_id
             )));
         }
+
+        let stream_registry = self.js_stream_registry.clone();
 
         let start_time = Instant::now();
         let effective_timeout = self.effective_timeout_ms(timeout_ms);
@@ -2170,6 +2400,7 @@ impl RuntimeCoreState {
                                     &mut try_catch,
                                     fulfilled_value,
                                     limits,
+                                    stream_registry.clone(),
                                 )
                                 .map(SyncCallOutcome::Immediate)
                                 .map_err(SyncCallError::Runtime)
@@ -2188,6 +2419,7 @@ impl RuntimeCoreState {
                             &mut try_catch,
                             result_value,
                             limits,
+                            stream_registry,
                         )
                         .map(SyncCallOutcome::Immediate)
                         .map_err(SyncCallError::Runtime)
@@ -2226,11 +2458,38 @@ impl RuntimeCoreState {
         Ok(())
     }
 
+    fn release_js_stream(&self, stream_id: u32) -> RuntimeResult<()> {
+        self.js_stream_registry.release(stream_id);
+        Ok(())
+    }
+
+    fn cancel_js_stream(&mut self, stream_id: u32) -> RuntimeResult<()> {
+        {
+            let scope = &mut self.js_runtime.handle_scope();
+            if let Ok(reader) = self.js_stream_registry.ensure_reader(scope, stream_id) {
+                if let Some(cancel_key) = v8::String::new(scope, "cancel") {
+                    if let Some(cancel_value) = reader.get(scope, cancel_key.into()) {
+                        if let Ok(cancel_fn) = v8::Local::<v8::Function>::try_from(cancel_value) {
+                            let _ = cancel_fn.call(scope, reader.into(), &[]);
+                        }
+                    }
+                }
+            }
+        }
+
+        self.js_stream_registry.release(stream_id);
+        Ok(())
+    }
+
     fn collect_stats(&mut self) -> RuntimeResult<RuntimeStatsSnapshot> {
         let heap = self.snapshot_memory_usage();
         let execution = self.stats_state.snapshot();
         let activity = self.snapshot_activity();
-        Ok(RuntimeStatsSnapshot::new(heap, execution, activity))
+        let mut streams = self.js_stream_registry.stats_snapshot();
+        streams.merge(&self.py_stream_registry.stats_snapshot());
+        Ok(RuntimeStatsSnapshot::new(
+            heap, execution, activity, streams,
+        ))
     }
 
     /// Snapshot V8 heap statistics. `get_heap_statistics` is safe here because it only reads isolate state.
@@ -2258,6 +2517,7 @@ impl RuntimeCoreState {
         scope: &mut deno_core::v8::HandleScope<'s>,
         value: deno_core::v8::Local<'s, deno_core::v8::Value>,
         limits: SerializationLimits,
+        stream_registry: Rc<JsStreamRegistry>,
     ) -> RuntimeResult<JSValue> {
         let mut seen = HashSet::new();
         let mut tracker = LimitTracker::new(limits.max_depth, limits.max_bytes);
@@ -2269,6 +2529,7 @@ impl RuntimeCoreState {
             &mut seen,
             &mut tracker,
             None,
+            stream_registry,
         )
     }
 
@@ -2353,10 +2614,33 @@ impl RuntimeCoreState {
                 })?;
                 Ok(v8::Local::new(scope, &stored.function).into())
             }
+            JSValue::PyStream { id } => {
+                let context = scope.get_current_context();
+                let global = context.global(scope);
+                let helper_key = v8::String::new(scope, "__jsrun_from_py_stream")
+                    .ok_or_else(|| RuntimeError::internal("Failed to allocate helper key"))?;
+                let helper_value = global.get(scope, helper_key.into()).ok_or_else(|| {
+                    RuntimeError::internal("Missing __jsrun_from_py_stream helper")
+                })?;
+                let helper_fn =
+                    v8::Local::<v8::Function>::try_from(helper_value).map_err(|_| {
+                        RuntimeError::internal("__jsrun_from_py_stream is not callable")
+                    })?;
+                let id_value = v8::Number::new(scope, *id as f64);
+                helper_fn
+                    .call(scope, global.into(), &[id_value.into()])
+                    .ok_or_else(|| {
+                        RuntimeError::internal("__jsrun_from_py_stream invocation failed")
+                    })
+            }
+            JSValue::JsStream { .. } => Err(RuntimeError::internal(
+                "JsStream values cannot be sent back into JavaScript",
+            )),
         }
     }
 
     /// Internal recursive converter with cycle detection and optional receiver capture.
+    #[allow(clippy::too_many_arguments)]
     fn value_to_js_value_internal<'s>(
         fn_registry: &Rc<RefCell<HashMap<u32, StoredFunction>>>,
         next_fn_id: &Rc<RefCell<u32>>,
@@ -2365,6 +2649,7 @@ impl RuntimeCoreState {
         seen: &mut HashSet<i32>,
         tracker: &mut LimitTracker,
         receiver: Option<deno_core::v8::Global<deno_core::v8::Value>>,
+        stream_registry: Rc<JsStreamRegistry>,
     ) -> RuntimeResult<JSValue> {
         tracker.enter()?;
 
@@ -2507,6 +2792,7 @@ impl RuntimeCoreState {
                     seen,
                     tracker,
                     None,
+                    stream_registry.clone(),
                 )?);
             }
 
@@ -2544,6 +2830,7 @@ impl RuntimeCoreState {
                     seen,
                     tracker,
                     None,
+                    stream_registry.clone(),
                 )?);
             }
 
@@ -2558,6 +2845,10 @@ impl RuntimeCoreState {
             }
             tracker.add_bytes(16)?;
             Ok(JSValue::Date(epoch_ms.round() as i64))
+        } else if value.is_object() && Self::is_readable_stream(scope, value) {
+            let stream_id = stream_registry.register_stream(scope, value);
+            tracker.add_bytes(std::mem::size_of::<u32>())?;
+            Ok(JSValue::JsStream { id: stream_id })
         } else if value.is_object() {
             // Check for circular reference using identity hash
             let obj = deno_core::v8::Local::<deno_core::v8::Object>::try_from(value)
@@ -2608,6 +2899,7 @@ impl RuntimeCoreState {
                         seen,
                         tracker,
                         receiver_for_val,
+                        stream_registry.clone(),
                     )?,
                 );
             }
@@ -2636,7 +2928,7 @@ mod tests {
     #[test]
     fn dispatcher_exits_when_channel_closes() {
         let baseline = active_runtime_threads();
-        let (cmd_tx, termination, _) =
+        let (cmd_tx, termination, _, _) =
             spawn_runtime_thread(RuntimeConfig::default()).expect("spawn runtime");
         assert_eq!(
             active_runtime_threads(),

@@ -16,6 +16,7 @@ pub mod python;
 pub mod runner;
 pub mod snapshot;
 pub mod stats;
+pub mod stream;
 
 #[allow(unused_imports)] // Re-exported for downstream crates.
 pub use config::RuntimeConfig;

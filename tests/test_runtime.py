@@ -17,6 +17,7 @@ import pytest
 from jsrun import (
     JavaScriptError,
     JsFunction,
+    JsStream,
     JsUndefined,
     Runtime,
     RuntimeConfig,
@@ -1618,6 +1619,190 @@ class TestRuntimeOpsNativeTypes:
                 runtime.eval("__host_op_sync__(0)")
             message = str(exc_info.value).lower()
             assert "size" in message or "limit" in message
+
+
+class TestStreaming:
+    @pytest.mark.asyncio
+    async def test_js_stream_round_trip(self):
+        runtime = Runtime()
+        try:
+            js_stream = await runtime.eval_async(
+                """
+                (async () => {
+                    const stream = new ReadableStream({
+                        start(controller) {
+                            controller.enqueue("alpha");
+                            controller.enqueue("beta");
+                            controller.close();
+                        }
+                    });
+                    return stream;
+                })()
+                """
+            )
+            assert isinstance(js_stream, JsStream)
+
+            chunks = []
+            async for chunk in js_stream:
+                chunks.append(chunk)
+
+            assert chunks == ["alpha", "beta"]
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_python_stream_consumed_in_js(self):
+        runtime = Runtime()
+
+        async def producer():
+            yield "left"
+            await asyncio.sleep(0)
+            yield "right"
+
+        try:
+            py_stream = runtime.stream_from_async_iterable(producer())
+            setter = runtime.eval("(stream) => { globalThis.py_stream = stream; }")
+            setter(py_stream)
+
+            result = await runtime.eval_async(
+                """
+                (async () => {
+                    const reader = py_stream.getReader();
+                    const parts = [];
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        parts.push(value);
+                    }
+                    return parts.join("|");
+                })()
+                """
+            )
+
+            assert result == "left|right"
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_python_stream_error_rejects_js_reader(self):
+        runtime = Runtime()
+
+        async def faulty():
+            yield "start"
+            raise RuntimeError("py boom")
+
+        try:
+            py_stream = runtime.stream_from_async_iterable(faulty())
+            setter = runtime.eval("(stream) => { globalThis.py_faulty = stream; }")
+            setter(py_stream)
+
+            with pytest.raises(JavaScriptError) as exc_info:
+                await runtime.eval_async(
+                    """
+                    (async () => {
+                        const reader = py_faulty.getReader();
+                        await reader.read();
+                        await reader.read();
+                        return "never";
+                    })()
+                    """
+                )
+            assert "py boom" in str(exc_info.value)
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_python_stream_cancelled_from_js(self):
+        runtime = Runtime()
+        cancel_event = asyncio.Event()
+
+        class CancelAware:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                await asyncio.sleep(0)
+                return "chunk"
+
+            async def aclose(self):
+                cancel_event.set()
+
+        try:
+            py_stream = runtime.stream_from_async_iterable(CancelAware())
+            setter = runtime.eval("(stream) => { globalThis.py_cancel = stream; }")
+            setter(py_stream)
+
+            await runtime.eval_async(
+                """
+                (async () => {
+                    const reader = py_cancel.getReader();
+                    await reader.read();
+                    await reader.cancel("stop");
+                })()
+                """
+            )
+
+            await asyncio.wait_for(cancel_event.wait(), timeout=2)
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_js_stream_cancelled_from_python(self):
+        runtime = Runtime()
+        try:
+            js_stream = runtime.eval(
+                """
+                (() => {
+                    globalThis._js_stream_cancelled = false;
+                    return new ReadableStream({
+                        start(controller) {
+                            controller.enqueue("one");
+                            controller.enqueue("two");
+                        },
+                        cancel() {
+                            globalThis._js_stream_cancelled = true;
+                        }
+                    });
+                })()
+                """
+            )
+
+            chunks = []
+            async for chunk in js_stream:
+                chunks.append(chunk)
+                break
+
+            js_stream.close()
+
+            assert runtime.eval("_js_stream_cancelled") is True
+        finally:
+            runtime.close()
+
+    @pytest.mark.asyncio
+    async def test_js_stream_error_raises_in_python(self):
+        runtime = Runtime()
+        try:
+            js_stream = runtime.eval(
+                """
+                new ReadableStream({
+                    start(controller) {
+                        controller.enqueue("first");
+                        controller.error(new Error("boom"));
+                    }
+                })
+                """
+            )
+
+            async def consume():
+                async for _ in js_stream:
+                    await asyncio.sleep(0)
+
+            with pytest.raises(JavaScriptError) as exc_info:
+                await consume()
+
+            assert "boom" in str(exc_info.value)
+        finally:
+            runtime.close()
 
 
 class TestSnapshots:
