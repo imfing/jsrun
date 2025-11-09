@@ -195,6 +195,60 @@ impl Default for RuntimeConfig {
     }
 }
 
+impl RuntimeConfig {
+    fn validate_timeout_seconds(seconds: f64) -> PyResult<()> {
+        if !seconds.is_finite() {
+            return Err(PyValueError::new_err("Timeout must be finite"));
+        }
+        if seconds < 0.0 {
+            return Err(PyValueError::new_err("Timeout cannot be negative"));
+        }
+        if seconds == 0.0 {
+            return Err(PyValueError::new_err("Timeout cannot be zero"));
+        }
+        if seconds > u64::MAX as f64 {
+            return Err(PyValueError::new_err("Timeout is too large"));
+        }
+        Ok(())
+    }
+
+    fn duration_from_py_timeout(timeout_value: &Bound<'_, PyAny>) -> PyResult<Duration> {
+        if let Ok(seconds) = timeout_value.extract::<f64>() {
+            Self::validate_timeout_seconds(seconds)?;
+            return Ok(Duration::from_secs_f64(seconds));
+        }
+
+        if let Ok(seconds) = timeout_value.extract::<u64>() {
+            if seconds == 0 {
+                return Err(PyValueError::new_err("Timeout cannot be zero"));
+            }
+            return Ok(Duration::from_secs(seconds));
+        }
+
+        if let Ok(seconds) = timeout_value.extract::<i64>() {
+            if seconds < 0 {
+                return Err(PyValueError::new_err("Timeout cannot be negative"));
+            }
+            if seconds == 0 {
+                return Err(PyValueError::new_err("Timeout cannot be zero"));
+            }
+            return Ok(Duration::from_secs(seconds as u64));
+        }
+
+        let py = timeout_value.py();
+        let timedelta = py.import("datetime")?.getattr("timedelta")?;
+        if timeout_value.is_instance(&timedelta)? {
+            let total_seconds: f64 = timeout_value.getattr("total_seconds")?.call0()?.extract()?;
+            Self::validate_timeout_seconds(total_seconds)?;
+            Ok(Duration::from_secs_f64(total_seconds))
+        } else {
+            Err(PyValueError::new_err(
+                "Timeout must be a number (seconds) or datetime.timedelta object",
+            ))
+        }
+    }
+}
+
 #[pymethods]
 impl RuntimeConfig {
     /// Create a new runtime configuration with default settings.
@@ -245,26 +299,7 @@ impl RuntimeConfig {
 
         // Set timeout if provided
         if let Some(timeout_value) = timeout {
-            let duration = if let Ok(seconds) = timeout_value.extract::<f64>() {
-                Duration::from_secs_f64(seconds)
-            } else if let Ok(seconds) = timeout_value.extract::<u64>() {
-                Duration::from_secs(seconds)
-            } else if let Ok(seconds) = timeout_value.extract::<i64>() {
-                Duration::from_secs(seconds as u64)
-            } else {
-                // Try to extract as timedelta
-                let py = timeout_value.py();
-                let timedelta = py.import("datetime")?.getattr("timedelta")?;
-                if timeout_value.is_instance(&timedelta)? {
-                    let total_seconds: f64 =
-                        timeout_value.getattr("total_seconds")?.call0()?.extract()?;
-                    Duration::from_secs_f64(total_seconds)
-                } else {
-                    return Err(PyValueError::new_err(
-                        "Timeout must be a number (seconds) or datetime.timedelta object",
-                    ));
-                }
-            };
+            let duration = RuntimeConfig::duration_from_py_timeout(timeout_value)?;
             config.execution_timeout = Some(duration);
         }
 
@@ -336,27 +371,7 @@ impl RuntimeConfig {
     /// Accepts float/int as seconds or datetime.timedelta object.
     #[setter]
     fn set_timeout<'py>(&mut self, timeout: &Bound<'py, PyAny>) -> PyResult<()> {
-        let duration = if let Ok(seconds) = timeout.extract::<f64>() {
-            Duration::from_secs_f64(seconds)
-        } else if let Ok(seconds) = timeout.extract::<u64>() {
-            Duration::from_secs(seconds)
-        } else if let Ok(seconds) = timeout.extract::<i64>() {
-            Duration::from_secs(seconds as u64)
-        } else {
-            // Try to extract as timedelta
-            let py = timeout.py();
-            let timedelta = py.import("datetime")?.getattr("timedelta")?;
-            if timeout.is_instance(&timedelta)? {
-                let total_seconds: f64 = timeout.getattr("total_seconds")?.call0()?.extract()?;
-                Duration::from_secs_f64(total_seconds)
-            } else {
-                return Err(PyValueError::new_err(
-                    "Timeout must be a number (seconds) or datetime.timedelta object",
-                ));
-            }
-        };
-
-        self.execution_timeout = Some(duration);
+        self.execution_timeout = Some(RuntimeConfig::duration_from_py_timeout(timeout)?);
         Ok(())
     }
 
@@ -415,6 +430,8 @@ impl RuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pyo3::types::PyFloat;
+    use std::f64;
 
     #[test]
     fn test_default_config() {
@@ -466,5 +483,23 @@ mod tests {
         assert!(configured.wait_for_connection());
         assert!(configured.break_on_next_statement());
         assert_eq!(configured.target_url(), Some("module:main".to_string()));
+    }
+
+    #[test]
+    fn rejects_negative_timeout() {
+        Python::attach(|py| {
+            let timeout = PyFloat::new(py, -1.0).into_any();
+            let err = RuntimeConfig::duration_from_py_timeout(&timeout);
+            assert!(err.is_err());
+        });
+    }
+
+    #[test]
+    fn rejects_infinite_timeout() {
+        Python::attach(|py| {
+            let timeout = PyFloat::new(py, f64::INFINITY).into_any();
+            let err = RuntimeConfig::duration_from_py_timeout(&timeout);
+            assert!(err.is_err());
+        });
     }
 }

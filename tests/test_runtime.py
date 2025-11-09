@@ -1189,6 +1189,59 @@ class TestRuntimeConfig:
         with pytest.raises(ValueError, match="Timeout must be a number"):
             config.timeout = "invalid"
 
+    @pytest.mark.parametrize(
+        "timeout_value,expected_error",
+        [
+            (-1.0, "Timeout cannot be negative"),
+            (-5, "Timeout cannot be negative"),
+            (timedelta(seconds=-1), "Timeout cannot be negative"),
+            (0, "Timeout cannot be zero"),
+            (0.0, "Timeout cannot be zero"),
+            (timedelta(seconds=0), "Timeout cannot be zero"),
+            (float("nan"), "Timeout must be finite"),
+            (float("inf"), "Timeout must be finite"),
+            (float("-inf"), "Timeout must be finite"),
+            ("invalid", "Timeout must be a number"),
+            ([1, 2, 3], "Timeout must be a number"),
+            ({"timeout": 1}, "Timeout must be a number"),
+        ],
+    )
+    def test_runtime_config_timeout_validation_constructor(
+        self, timeout_value, expected_error
+    ):
+        """Test RuntimeConfig constructor rejects invalid timeout values."""
+        from jsrun import RuntimeConfig
+
+        with pytest.raises(ValueError, match=expected_error):
+            RuntimeConfig(timeout=timeout_value)
+
+    @pytest.mark.parametrize(
+        "timeout_value,expected_error",
+        [
+            (-1.0, "Timeout cannot be negative"),
+            (-5, "Timeout cannot be negative"),
+            (timedelta(seconds=-1), "Timeout cannot be negative"),
+            (0, "Timeout cannot be zero"),
+            (0.0, "Timeout cannot be zero"),
+            (timedelta(seconds=0), "Timeout cannot be zero"),
+            (float("nan"), "Timeout must be finite"),
+            (float("inf"), "Timeout must be finite"),
+            (float("-inf"), "Timeout must be finite"),
+            ("invalid", "Timeout must be a number"),
+            ([1, 2, 3], "Timeout must be a number"),
+            ({"timeout": 1}, "Timeout must be a number"),
+        ],
+    )
+    def test_runtime_config_timeout_validation_setter(
+        self, timeout_value, expected_error
+    ):
+        """Test RuntimeConfig timeout setter rejects invalid timeout values."""
+        from jsrun import RuntimeConfig
+
+        config = RuntimeConfig()
+        with pytest.raises(ValueError, match=expected_error):
+            config.timeout = timeout_value
+
     @pytest.mark.asyncio
     async def test_runtime_config_execution_timeout_applies_to_eval_async(self):
         """RuntimeConfig.timeout should act as default timeout for eval_async."""
