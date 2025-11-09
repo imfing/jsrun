@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::ptr::NonNull;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::mpsc::Sender as StdSender;
 use std::sync::mpsc::Sender;
@@ -49,6 +49,23 @@ type SpawnRuntimeResult = (
     TerminationController,
     Option<(InspectorMetadata, InspectorConnectionState)>,
 );
+
+static ACTIVE_RUNTIME_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+struct RuntimeThreadGuard;
+
+impl RuntimeThreadGuard {
+    fn new() -> Self {
+        ACTIVE_RUNTIME_THREADS.fetch_add(1, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for RuntimeThreadGuard {
+    fn drop(&mut self) {
+        ACTIVE_RUNTIME_THREADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 /// Stored function with optional receiver for 'this' binding
 struct StoredFunction {
@@ -361,8 +378,11 @@ impl RuntimeDispatcher {
                 biased; // Prefer new commands over yielding
 
                 // New command from Python
-                Some(cmd) = self.cmd_rx.recv() => {
-                    self.handle_command(cmd)
+                cmd = self.cmd_rx.recv() => {
+                    match cmd {
+                        Some(cmd) => self.handle_command(cmd),
+                        None => self.handle_channel_closed(),
+                    }
                 }
 
                 // No new commands - yield to allow tokio to schedule other tasks
@@ -680,6 +700,34 @@ impl RuntimeDispatcher {
                 true // Exit the loop
             }
         }
+    }
+
+    /// Handle the command channel closing without an explicit shutdown request.
+    fn handle_channel_closed(&mut self) -> bool {
+        tracing::warn!("Command channel closed without explicit shutdown - cleaning up");
+        if let Some(job) = self.active_job.take() {
+            tracing::debug!("Dropping active job after command channel closed");
+            job.send_result(Err(RuntimeError::terminated()));
+        }
+
+        if !self.pending_jobs.is_empty() {
+            tracing::debug!(
+                count = self.pending_jobs.len(),
+                "Cancelling pending jobs after command channel closed"
+            );
+        }
+        while let Some(job) = self.pending_jobs.pop_front() {
+            job.send_result(Err(RuntimeError::terminated()));
+        }
+
+        self.core.clear_task_locals();
+        if let Err(err) = self.core.finalize_termination() {
+            tracing::warn!(
+                "Failed to finalize termination after command channel closed: {}",
+                err
+            );
+        }
+        true
     }
 }
 
@@ -1436,6 +1484,7 @@ pub fn spawn_runtime_thread(config: RuntimeConfig) -> RuntimeResult<SpawnRuntime
     std::thread::Builder::new()
         .name("jsrun-deno-runtime".to_string())
         .spawn(move || {
+            let _thread_guard = RuntimeThreadGuard::new();
             let tokio_rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -1472,6 +1521,10 @@ pub fn spawn_runtime_thread(config: RuntimeConfig) -> RuntimeResult<SpawnRuntime
             "Runtime thread initialization failed",
         )),
     }
+}
+
+pub fn active_runtime_threads() -> usize {
+    ACTIVE_RUNTIME_THREADS.load(Ordering::SeqCst)
 }
 
 struct InspectorRuntimeState {
@@ -2530,5 +2583,39 @@ impl RuntimeCoreState {
 
         tracker.exit();
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatcher_exits_when_channel_closes() {
+        let baseline = active_runtime_threads();
+        let (cmd_tx, termination, _) =
+            spawn_runtime_thread(RuntimeConfig::default()).expect("spawn runtime");
+        assert_eq!(
+            active_runtime_threads(),
+            baseline + 1,
+            "runtime thread should register"
+        );
+
+        drop(cmd_tx);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if active_runtime_threads() == baseline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            active_runtime_threads(),
+            baseline,
+            "runtime thread should exit after command channel closes"
+        );
+        drop(termination);
     }
 }

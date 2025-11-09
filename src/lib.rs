@@ -26,5 +26,9 @@ fn _jsrun(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     let undefined: Py<PyAny> = runtime::python::get_js_undefined(m.py())?.into();
     m.add("undefined", undefined)?;
+    m.add_function(pyo3::wrap_pyfunction!(
+        runtime::python::_debug_active_runtime_threads,
+        m
+    )?)?;
     Ok(())
 }

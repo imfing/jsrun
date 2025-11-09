@@ -7,8 +7,10 @@ surface promise/timeouts/errors consistently with the Rust core.
 """
 
 import asyncio
+import gc
 import math
 import time
+import weakref
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -23,6 +25,7 @@ from jsrun import (
     SnapshotBuilder,
     undefined,
 )
+from jsrun._jsrun import _debug_active_runtime_threads
 
 
 class TestRuntimeStats:
@@ -157,6 +160,35 @@ class TestRuntimeBasics:
             assert result == "undefined"
         finally:
             runtime.close()
+
+    def test_runtime_drop_shutdown(self):
+        """Dropping the Runtime without close() should let the thread exit."""
+        base_threads = _debug_active_runtime_threads()
+
+        runtime = Runtime()
+        assert _debug_active_runtime_threads() == base_threads + 1
+
+        runtime_ref = weakref.ref(runtime)
+        del runtime
+
+        # Wait for Python GC to collect the Runtime object
+        deadline = time.time() + 5
+        while runtime_ref() is not None and time.time() < deadline:
+            gc.collect()
+            time.sleep(0.05)
+
+        assert runtime_ref() is None
+
+        # Now wait for the runtime thread to observe the drop and exit
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if _debug_active_runtime_threads() == base_threads:
+                break
+            time.sleep(0.05)
+
+        assert _debug_active_runtime_threads() == base_threads, (
+            "runtime thread should exit after drop"
+        )
 
     def test_runtime_eval_simple(self):
         """Test basic JavaScript evaluation."""

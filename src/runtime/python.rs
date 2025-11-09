@@ -7,7 +7,7 @@ use super::handle::RuntimeHandle;
 use super::inspector::InspectorMetadata;
 use super::js_value::JSValue;
 use super::ops::PythonOpMode;
-use super::runner::FunctionCallResult;
+use super::runner::{self, FunctionCallResult};
 use super::snapshot::{SnapshotBuilder, SnapshotBuilderConfig};
 use super::stats::{RuntimeCallKind, RuntimeStatsSnapshot};
 use pyo3::create_exception;
@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::sync::oneshot;
 
-#[pyclass(unsendable)]
+#[pyclass(unsendable, weakref)]
 pub struct Runtime {
     handle: std::cell::RefCell<Option<RuntimeHandle>>,
 }
@@ -33,6 +33,11 @@ create_exception!(crate::runtime::python, RuntimeTerminated, PyRuntimeError);
 #[pyclass(name = "SnapshotBuilder", module = "jsrun", unsendable)]
 pub struct SnapshotBuilderPy {
     builder: std::cell::RefCell<Option<SnapshotBuilder>>,
+}
+
+#[pyfunction]
+pub fn _debug_active_runtime_threads() -> usize {
+    runner::active_runtime_threads()
 }
 
 fn set_optional_attr(py: Python<'_>, value: &Bound<'_, PyAny>, name: &str, attr: Option<String>) {
