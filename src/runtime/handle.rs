@@ -36,6 +36,20 @@ pub struct RuntimeHandle {
     py_stream_registry: PyStreamRegistry,
 }
 
+/// Represents a property assignment when binding Python objects into the JS global namespace.
+#[derive(Debug)]
+pub(crate) enum BoundObjectProperty {
+    Value {
+        key: String,
+        value: JSValue,
+    },
+    Op {
+        key: String,
+        op_id: u32,
+        mode: PythonOpMode,
+    },
+}
+
 impl RuntimeHandle {
     pub fn spawn(config: RuntimeConfig) -> RuntimeResult<Self> {
         let serialization_limits = config.serialization_limits();
@@ -190,6 +204,27 @@ impl RuntimeHandle {
         result_rx
             .recv()
             .map_err(|_| RuntimeError::internal("Failed to receive add_static_module result"))?
+    }
+
+    pub(crate) fn bind_object(
+        &self,
+        name: String,
+        properties: Vec<BoundObjectProperty>,
+    ) -> RuntimeResult<()> {
+        let sender = self.sender()?.clone();
+        let (result_tx, result_rx) = mpsc::channel();
+
+        sender
+            .send(RuntimeCommand::BindObject {
+                name,
+                properties,
+                responder: result_tx,
+            })
+            .map_err(|_| RuntimeError::internal("Failed to send bind_object command"))?;
+
+        result_rx
+            .recv()
+            .map_err(|_| RuntimeError::internal("Failed to receive bind_object result"))?
     }
 
     pub fn eval_module_sync(&self, specifier: &str) -> RuntimeResult<JSValue> {

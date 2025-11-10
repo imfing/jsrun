@@ -501,6 +501,28 @@ class TestBindObject:
 
             assert result == [12, 7]
 
+    def test_bind_object_with_escaped_keys(self):
+        runtime = Runtime()
+        try:
+            evil_key = "value']; globalThis.__pwn = true; //"
+            runtime.bind_object("safeApi", {evil_key: 42})
+
+            value = runtime.eval(f"safeApi[{json.dumps(evil_key)}]")
+            assert value == 42
+            assert runtime.eval("globalThis.__pwn === undefined")
+        finally:
+            runtime.close()
+
+    def test_bind_object_with_special_global_name(self):
+        runtime = Runtime()
+        try:
+            global_name = "api.with$odd.chars"
+            runtime.bind_object(global_name, {"value": 9})
+            observed = runtime.eval(f"globalThis[{json.dumps(global_name)}].value")
+            assert observed == 9
+        finally:
+            runtime.close()
+
 
 class TestOpGuarding:
     """Demonstrate Python-level permission enforcement."""

@@ -354,6 +354,29 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
   globalThis.__host_op_async__ = function (opId, ...args) {
     return globalThis.__jsrunCallAsync(opId, ...args);
   };
+  globalThis.__jsrun_bind_object = function (globalName, assignments) {
+    if (typeof globalName !== "string" || !Array.isArray(assignments)) {
+      return;
+    }
+    const target = globalThis[globalName] ?? (globalThis[globalName] = {});
+    for (const entry of assignments) {
+      if (!entry || typeof entry !== "object" || typeof entry.key !== "string") {
+        continue;
+      }
+      if (entry.kind === "op") {
+        const bridge =
+          entry.mode === "async"
+            ? globalThis.__host_op_async__
+            : globalThis.__host_op_sync__;
+        if (typeof bridge !== "function" || typeof entry.op_id !== "number") {
+          continue;
+        }
+        target[entry.key] = (...args) => bridge(entry.op_id, ...args);
+      } else if (entry.kind === "value") {
+        target[entry.key] = entry.value;
+      }
+    }
+  };
 
   if (typeof globalThis.ReadableStream !== "function") {
     // Note: This minimal polyfill does not implement backpressure or BYOB readers.

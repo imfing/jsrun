@@ -6,6 +6,7 @@
 
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::error::{JsExceptionDetails, RuntimeError, RuntimeResult};
+use crate::runtime::handle::BoundObjectProperty;
 use crate::runtime::inspector::{
     InspectorConnectionState, InspectorMetadata, InspectorRegistration,
     InspectorRegistrationParams, InspectorServer,
@@ -251,6 +252,11 @@ pub enum RuntimeCommand {
     AddStaticModule {
         name: String,
         source: String,
+        responder: Sender<RuntimeResult<()>>,
+    },
+    BindObject {
+        name: String,
+        properties: Vec<BoundObjectProperty>,
         responder: Sender<RuntimeResult<()>>,
     },
     CallFunctionSync {
@@ -511,6 +517,19 @@ impl RuntimeDispatcher {
                 } else {
                     self.core.module_loader.add_static_module(name, source);
                     Ok(())
+                };
+                let _ = responder.send(result);
+                false
+            }
+            RuntimeCommand::BindObject {
+                name,
+                properties,
+                responder,
+            } => {
+                let result = if self.core.should_reject_new_work() {
+                    Err(RuntimeError::terminated())
+                } else {
+                    self.core.bind_object(name, properties)
                 };
                 let _ = responder.send(result);
                 false
@@ -2188,6 +2207,134 @@ impl RuntimeCoreState {
         handler: Py<PyAny>,
     ) -> RuntimeResult<u32> {
         Ok(self.registry.register(name, mode, handler))
+    }
+
+    fn bind_object(
+        &mut self,
+        name: String,
+        properties: Vec<BoundObjectProperty>,
+    ) -> RuntimeResult<()> {
+        let scope = &mut self.js_runtime.handle_scope();
+        let mut try_catch = v8::TryCatch::new(scope);
+        let context = try_catch.get_current_context();
+        let global = context.global(&mut try_catch);
+
+        let helper_key = v8::String::new(&mut try_catch, "__jsrun_bind_object")
+            .ok_or_else(|| RuntimeError::internal("Failed to allocate helper name"))?;
+        let helper_value = global
+            .get(&mut try_catch, helper_key.into())
+            .ok_or_else(|| RuntimeError::internal("Missing __jsrun_bind_object helper"))?;
+        let helper_fn = v8::Local::<v8::Function>::try_from(helper_value)
+            .map_err(|_| RuntimeError::internal("__jsrun_bind_object is not callable"))?;
+
+        let global_name = v8::String::new(&mut try_catch, &name)
+            .ok_or_else(|| RuntimeError::internal("Failed to allocate target name"))?;
+
+        let assignments = v8::Array::new(&mut try_catch, properties.len() as i32);
+
+        for (index, entry) in properties.into_iter().enumerate() {
+            let entry_obj = v8::Object::new(&mut try_catch);
+
+            let key_literal = v8::String::new(&mut try_catch, "key")
+                .ok_or_else(|| RuntimeError::internal("Failed to allocate 'key' literal"))?;
+            let key_value = v8::String::new(
+                &mut try_catch,
+                match &entry {
+                    BoundObjectProperty::Value { key, .. }
+                    | BoundObjectProperty::Op { key, .. } => key,
+                },
+            )
+            .ok_or_else(|| RuntimeError::internal("Failed to allocate property name"))?;
+            entry_obj
+                .set(&mut try_catch, key_literal.into(), key_value.into())
+                .ok_or_else(|| RuntimeError::internal("Failed to set entry key"))?;
+
+            let kind_literal = v8::String::new(&mut try_catch, "kind")
+                .ok_or_else(|| RuntimeError::internal("Failed to allocate 'kind' literal"))?;
+
+            match entry {
+                BoundObjectProperty::Value { key: _, value } => {
+                    let kind_value = v8::String::new(&mut try_catch, "value")
+                        .ok_or_else(|| RuntimeError::internal("Failed to allocate kind value"))?;
+                    entry_obj
+                        .set(&mut try_catch, kind_literal.into(), kind_value.into())
+                        .ok_or_else(|| RuntimeError::internal("Failed to set entry kind"))?;
+
+                    let value_literal =
+                        v8::String::new(&mut try_catch, "value").ok_or_else(|| {
+                            RuntimeError::internal("Failed to allocate 'value' literal")
+                        })?;
+                    let v8_value = RuntimeCoreState::js_value_to_v8(
+                        &self.fn_registry,
+                        &mut try_catch,
+                        &value,
+                    )?;
+                    entry_obj
+                        .set(&mut try_catch, value_literal.into(), v8_value)
+                        .ok_or_else(|| RuntimeError::internal("Failed to set entry value"))?;
+                }
+                BoundObjectProperty::Op {
+                    key: _,
+                    op_id,
+                    mode,
+                } => {
+                    let kind_value = v8::String::new(&mut try_catch, "op")
+                        .ok_or_else(|| RuntimeError::internal("Failed to allocate kind value"))?;
+                    entry_obj
+                        .set(&mut try_catch, kind_literal.into(), kind_value.into())
+                        .ok_or_else(|| RuntimeError::internal("Failed to set entry kind"))?;
+
+                    let op_id_literal =
+                        v8::String::new(&mut try_catch, "op_id").ok_or_else(|| {
+                            RuntimeError::internal("Failed to allocate 'op_id' literal")
+                        })?;
+                    let op_id_value = v8::Number::new(&mut try_catch, op_id as f64);
+                    entry_obj
+                        .set(&mut try_catch, op_id_literal.into(), op_id_value.into())
+                        .ok_or_else(|| RuntimeError::internal("Failed to set op id"))?;
+
+                    let mode_literal =
+                        v8::String::new(&mut try_catch, "mode").ok_or_else(|| {
+                            RuntimeError::internal("Failed to allocate 'mode' literal")
+                        })?;
+                    let mode_value = v8::String::new(
+                        &mut try_catch,
+                        match mode {
+                            PythonOpMode::Async => "async",
+                            PythonOpMode::Sync => "sync",
+                        },
+                    )
+                    .ok_or_else(|| RuntimeError::internal("Failed to allocate mode value"))?;
+                    entry_obj
+                        .set(&mut try_catch, mode_literal.into(), mode_value.into())
+                        .ok_or_else(|| RuntimeError::internal("Failed to set mode"))?;
+                }
+            }
+
+            assignments
+                .set_index(&mut try_catch, index as u32, entry_obj.into())
+                .ok_or_else(|| RuntimeError::internal("Failed to store assignment entry"))?;
+        }
+
+        match helper_fn.call(
+            &mut try_catch,
+            global.into(),
+            &[global_name.into(), assignments.into()],
+        ) {
+            Some(_) => Ok(()),
+            None => {
+                if let Some(exception) = try_catch.exception() {
+                    let js_error = JsError::from_v8_exception(&mut try_catch, exception);
+                    Err(RuntimeError::javascript(JsExceptionDetails::from_js_error(
+                        *js_error,
+                    )))
+                } else {
+                    Err(RuntimeError::internal(
+                        "__jsrun_bind_object invocation failed",
+                    ))
+                }
+            }
+        }
     }
 
     /// Measure the duration of a synchronous entry point, including error paths.

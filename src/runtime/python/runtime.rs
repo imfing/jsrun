@@ -2,7 +2,7 @@
 
 use crate::runtime::config::RuntimeConfig;
 use crate::runtime::conversion::{js_value_to_python, python_to_js_value};
-use crate::runtime::handle::RuntimeHandle;
+use crate::runtime::handle::{BoundObjectProperty, RuntimeHandle};
 use crate::runtime::js_value::{JSValue, SerializationLimits};
 use crate::runtime::ops::PythonOpMode;
 use crate::runtime::runner::FunctionCallResult;
@@ -66,68 +66,6 @@ impl Runtime {
                 other
             ))),
         }
-    }
-}
-
-fn js_value_to_js_expression(value: &JSValue) -> PyResult<String> {
-    match value {
-        JSValue::Undefined => Ok("undefined".to_string()),
-        JSValue::Null => Ok("null".to_string()),
-        JSValue::Bool(b) => Ok(b.to_string()),
-        JSValue::Int(i) => Ok(i.to_string()),
-        JSValue::BigInt(bigint) => Ok(format!("BigInt(\"{}\")", bigint.to_str_radix(10))),
-        JSValue::Float(f) => {
-            if f.is_nan() {
-                Ok("Number.NaN".to_string())
-            } else if f.is_infinite() {
-                if f.is_sign_positive() {
-                    Ok("Number.POSITIVE_INFINITY".to_string())
-                } else {
-                    Ok("Number.NEGATIVE_INFINITY".to_string())
-                }
-            } else {
-                Ok(f.to_string())
-            }
-        }
-        JSValue::String(s) => serde_json::to_string(s).map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to serialize string literal: {e}"))
-        }),
-        JSValue::Bytes(bytes) => serde_json::to_string(bytes)
-            .map(|data| format!("new Uint8Array({data})"))
-            .map_err(|e| {
-                PyRuntimeError::new_err(format!("Failed to serialize bytes literal: {e}"))
-            }),
-        JSValue::Array(items) => {
-            let mut parts = Vec::with_capacity(items.len());
-            for item in items {
-                parts.push(js_value_to_js_expression(item)?);
-            }
-            Ok(format!("[{}]", parts.join(", ")))
-        }
-        JSValue::Set(items) => {
-            let mut parts = Vec::with_capacity(items.len());
-            for item in items {
-                parts.push(js_value_to_js_expression(item)?);
-            }
-            Ok(format!("new Set([{}])", parts.join(", ")))
-        }
-        JSValue::Object(map) => {
-            let mut parts = Vec::with_capacity(map.len());
-            for (key, val) in map.iter() {
-                let key_literal = serde_json::to_string(key).map_err(|e| {
-                    PyRuntimeError::new_err(format!("Failed to serialize object key '{key}': {e}"))
-                })?;
-                let expr = js_value_to_js_expression(val)?;
-                parts.push(format!("{key_literal}: {expr}"));
-            }
-            Ok(format!("{{{}}}", parts.join(", ")))
-        }
-        JSValue::Date(epoch_ms) => Ok(format!("new Date({epoch_ms})")),
-        JSValue::Function { .. } => Err(PyRuntimeError::new_err(
-            "Cannot serialize function values; use callables directly",
-        )),
-        JSValue::JsStream { id } => Ok(format!("/* JsStream({id}) */ undefined")),
-        JSValue::PyStream { id } => Ok(format!("/* PyStream({id}) */ undefined")),
     }
 }
 
@@ -369,16 +307,10 @@ impl Runtime {
             .cast::<PyDict>()
             .map_err(|_| PyRuntimeError::new_err("bind_object expects a dict with string keys"))?;
 
-        let mut assignments: Vec<String> = Vec::with_capacity(dict.len());
+        let mut bindings = Vec::with_capacity(dict.len());
 
         for (key, value) in dict.iter() {
             let key_str: String = key.extract()?;
-            let key_literal = serde_json::to_string(&key_str).map_err(|e| {
-                PyRuntimeError::new_err(format!(
-                    "Failed to serialize property name '{key_str}': {e}"
-                ))
-            })?;
-
             if value.is_callable() {
                 let handler_py = value.unbind();
                 let is_async = Self::detect_async(py, &handler_py)?;
@@ -391,40 +323,23 @@ impl Runtime {
                 let op_id = handle
                     .register_op(op_name, mode_enum, handler_py)
                     .map_err(|e| runtime_error_with_context("Op registration failed", e))?;
-
-                let bridge_name = match mode_enum {
-                    PythonOpMode::Sync => "__host_op_sync__",
-                    PythonOpMode::Async => "__host_op_async__",
-                };
-
-                assignments.push(format!(
-                    "target[{key_literal}] = (...args) => {bridge_name}({op_id}, ...args);"
-                ));
+                bindings.push(BoundObjectProperty::Op {
+                    key: key_str,
+                    op_id,
+                    mode: mode_enum,
+                });
             } else {
                 let js_value = python_to_js_value(value, &serialization_limits)?;
-                let literal = js_value_to_js_expression(&js_value)?;
-                assignments.push(format!("target[{key_literal}] = {literal};"));
+                bindings.push(BoundObjectProperty::Value {
+                    key: key_str,
+                    value: js_value,
+                });
             }
         }
 
-        let name_literal = serde_json::to_string(&name).map_err(|e| {
-            PyRuntimeError::new_err(format!("Failed to serialize object name '{name}': {e}"))
-        })?;
-
-        let mut script = String::from("(() => {\n");
-        script.push_str("  const globalName = ");
-        script.push_str(&name_literal);
-        script.push_str(
-            ";\n  const target = globalThis[globalName] ?? (globalThis[globalName] = {});\n",
-        );
-        for assignment in assignments {
-            script.push_str("  ");
-            script.push_str(&assignment);
-            script.push('\n');
-        }
-        script.push_str("  return void 0;\n})();");
-
-        let _ = self.eval(py, script.as_str())?;
+        handle
+            .bind_object(name, bindings)
+            .map_err(|e| runtime_error_with_context("Failed to bind object", e))?;
         Ok(())
     }
 
