@@ -85,13 +85,11 @@ jobs:
             -H "Accept: application/vnd.github.v3+json" \
             https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token)
 
-          echo "API Response: $RESPONSE"
-
           TOKEN=$(echo "$RESPONSE" | jq -r .token)
 
           if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
-            echo "Failed to get registration token. Response:"
-            echo "$RESPONSE" | jq .
+            echo "Failed to get registration token"
+            echo "Error message: $(echo "$RESPONSE" | jq -r .message)"
             exit 1
           fi
 
@@ -149,9 +147,7 @@ jobs:
           uname -a
           df -h
           free -h
-
-      - name: Set up Docker
-        uses: docker/setup-docker-action@v4
+          docker --version
 
       - name: Build manylinux Docker image
         run: |

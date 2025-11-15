@@ -8,9 +8,18 @@ echo "Installing dependencies..."
 apt-get update
 apt-get install -y curl jq
 
+# Install Docker
+echo "Installing Docker..."
+curl -fsSL https://get.docker.com/ -o get-docker.sh
+sh get-docker.sh
+systemctl start docker
+systemctl enable docker
+docker --version
+
 # Create a user for the runner
 echo "Creating runner user..."
 useradd -m -s /bin/bash runner
+usermod -aG docker runner
 
 # Download and install GitHub Actions runner
 echo "Downloading GitHub Actions runner..."
