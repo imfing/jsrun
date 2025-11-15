@@ -2,6 +2,9 @@ name: Test Self-Hosted Runner
 
 on:
   workflow_dispatch:  # Manual trigger
+  pull_request:
+    branches:
+      - main
 
 jobs:
   test-runner:
