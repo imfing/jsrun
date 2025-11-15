@@ -1,0 +1,34 @@
+# x86_64 manylinux builder for jsrun Python wheels
+
+FROM ghcr.io/rust-cross/manylinux_2_28-cross:x86_64
+
+# Install Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
+
+# Add Rust components
+RUN rustup component add llvm-tools-preview || true
+
+# Install uv and maturin
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN /root/.local/bin/uv tool install maturin
+ENV PATH="/root/.local/share/uv/tools/maturin/bin:$PATH"
+
+# Install build dependencies for V8
+RUN apt-get update && \
+    apt-get install -y \
+    clang \
+    libclang-dev \
+    llvm-dev \
+    pkg-config \
+    libglib2.0-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set V8 build environment variables
+ENV V8_FROM_SOURCE=1
+ENV GN_ARGS="use_custom_libcxx=false v8_monolithic=true v8_monolithic_for_shared_library=true"
+
+WORKDIR /workdir
+
+# Default command
+CMD ["/bin/bash"]

@@ -132,8 +132,8 @@ jobs:
           echo "Runner failed to register within 10 minutes"
           exit 1
 
-  # Test job running on self-hosted GCP runner
-  test-self-hosted-flow:
+  # Build x86_64 wheels on self-hosted GCP runner
+  build-wheels:
     needs: provision
     runs-on: [self-hosted, gcp, spot]
     steps:
@@ -141,7 +141,7 @@ jobs:
 
       - name: Verify runner environment
         run: |
-          echo "Testing self-hosted runner workflow flow"
+          echo "Building wheels for x86_64"
           echo "Runner name: ${{ runner.name }}"
           echo "Runner OS: ${{ runner.os }}"
           echo "Branch: ${{ github.ref }}"
@@ -150,21 +150,39 @@ jobs:
           df -h
           free -h
 
-      - name: Simulate build artifact
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build manylinux Docker image
+        run: |
+          docker build \
+            -t jsrun-builder:x86_64 \
+            -f .github/docker/Dockerfile.x86_64 \
+            .github/docker/
+
+      - name: Build wheels in Docker
         run: |
           mkdir -p dist
-          echo "dummy-artifact-from-gcp-runner" > dist/test.txt
-          echo "Build completed at $(date)" >> dist/test.txt
+          docker run --rm \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            jsrun-builder:x86_64 \
+            bash .github/scripts/build-wheels.sh x86_64-unknown-linux-gnu
 
-      - name: Upload test artifact
+      - name: List built wheels
+        run: |
+          echo "Built wheels:"
+          ls -lh dist/
+
+      - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: test-artifact
-          path: dist/test.txt
+          name: wheels-linux-x86_64
+          path: dist/*.whl
 
   # Cleanup: Delete the GCP VM
   cleanup:
-    needs: [provision, test-self-hosted-flow]
+    needs: [provision, build-wheels]
     if: always()
     runs-on: ubuntu-latest
     steps:
