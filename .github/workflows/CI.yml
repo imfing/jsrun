@@ -14,7 +14,9 @@ permissions:
 
 jobs:
 
+  # Disabled for testing self-hosted runner flow
   macos:
+    if: false
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -40,6 +42,7 @@ jobs:
           name: wheels-macos-${{ matrix.platform.target }}
           path: dist
 
+  # Disabled for testing self-hosted runner flow
   sdist:
     if: false
     runs-on: ubuntu-latest
@@ -55,3 +58,111 @@ jobs:
         with:
           name: wheels-sdist
           path: dist
+
+  # Provision GCP Spot VM with self-hosted runner
+  provision:
+    runs-on: ubuntu-latest
+    outputs:
+      runner-name: ${{ steps.create-vm.outputs.runner_name }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - id: auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Get GitHub Runner Token
+        id: get-token
+        run: |
+          TOKEN=$(curl -X POST -H "Authorization: token ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token \
+            | jq -r .token)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Create Spot VM
+        id: create-vm
+        run: |
+          RUNNER_NAME="gcp-runner-${{ github.run_id }}-${{ github.run_attempt }}"
+          echo "runner_name=$RUNNER_NAME" >> $GITHUB_OUTPUT
+
+          gcloud compute instances create $RUNNER_NAME \
+            --zone=${{ vars.GCP_ZONE || 'us-central1-a' }} \
+            --machine-type=${{ vars.GCP_MACHINE_TYPE || 'n2-standard-2' }} \
+            --provisioning-model=SPOT \
+            --instance-termination-action=DELETE \
+            --image-family=ubuntu-2204-lts \
+            --image-project=ubuntu-os-cloud \
+            --boot-disk-size=50GB \
+            --metadata=runner-token=${{ steps.get-token.outputs.token }},repo-url=https://github.com/${{ github.repository }},runner-name=$RUNNER_NAME \
+            --metadata-from-file=startup-script=.github/scripts/startup.sh
+
+      - name: Wait for Runner Registration
+        run: |
+          echo "Waiting for runner to register..."
+          for i in {1..60}; do
+            if curl -s -H "Authorization: token ${{ secrets.GH_PAT }}" \
+              https://api.github.com/repos/${{ github.repository }}/actions/runners \
+              | jq -e '.runners[] | select(.name == "${{ steps.create-vm.outputs.runner_name }}")' > /dev/null; then
+              echo "Runner registered successfully!"
+              exit 0
+            fi
+            echo "Attempt $i/60: Runner not yet registered, waiting 10s..."
+            sleep 10
+          done
+          echo "Runner failed to register within 10 minutes"
+          exit 1
+
+  # Test job running on self-hosted GCP runner
+  test-self-hosted-flow:
+    needs: provision
+    runs-on: [self-hosted, gcp, spot]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify runner environment
+        run: |
+          echo "Testing self-hosted runner workflow flow"
+          echo "Runner name: ${{ runner.name }}"
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Branch: ${{ github.ref }}"
+          echo "Commit: ${{ github.sha }}"
+          uname -a
+          df -h
+          free -h
+
+      - name: Simulate build artifact
+        run: |
+          mkdir -p dist
+          echo "dummy-artifact-from-gcp-runner" > dist/test.txt
+          echo "Build completed at $(date)" >> dist/test.txt
+
+      - name: Upload test artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-artifact
+          path: dist/test.txt
+
+  # Cleanup: Delete the GCP VM
+  cleanup:
+    needs: [provision, test-self-hosted-flow]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v3
+
+      - name: Delete VM
+        run: |
+          gcloud compute instances delete ${{ needs.provision.outputs.runner-name }} \
+            --zone=${{ vars.GCP_ZONE || 'us-central1-a' }} \
+            --quiet || echo "VM may have already been terminated"
