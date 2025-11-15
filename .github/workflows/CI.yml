@@ -163,7 +163,7 @@ jobs:
             -v "$(pwd):/workdir" \
             -w /workdir \
             jsrun-manylinux-builder:x86_64 \
-            bash .github/scripts/build-wheels.sh x86_64-unknown-linux-gnu
+            bash .github/scripts/build-manylinux-wheels.sh x86_64-unknown-linux-gnu
 
       - name: List built wheels
         run: |
@@ -209,7 +209,7 @@ jobs:
             -v "$(pwd):/workdir" \
             -w /workdir \
             jsrun-manylinux-builder:aarch64 \
-            bash .github/scripts/build-wheels.sh aarch64-unknown-linux-gnu
+            bash .github/scripts/build-manylinux-wheels.sh aarch64-unknown-linux-gnu
 
       - name: List built wheels
         run: |

@@ -47,7 +47,7 @@ fi
 
 # Configure and start the runner
 echo "Configuring GitHub Actions runner..."
-su - runner -c "cd /home/runner && ./config.sh --url ${REPO_URL} --token ${RUNNER_TOKEN} --name ${RUNNER_NAME} --labels self-hosted,gcp,spot --unattended --ephemeral"
+su - runner -c "cd /home/runner && ./config.sh --url ${REPO_URL} --token ${RUNNER_TOKEN} --name ${RUNNER_NAME} --labels self-hosted,gcp,spot --unattended"
 
 echo "Starting runner..."
 su - runner -c "cd /home/runner && ./run.sh"
