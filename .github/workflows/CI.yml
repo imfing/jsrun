@@ -79,12 +79,25 @@ jobs:
       - name: Get GitHub Runner Token
         id: get-token
         run: |
-          TOKEN=$(curl -X POST -H "Authorization: token ${{ secrets.GH_PAT }}" \
+          echo "Requesting runner registration token for ${{ github.repository }}"
+          RESPONSE=$(curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GH_PAT }}" \
             -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token \
-            | jq -r .token)
+            https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token)
+
+          echo "API Response: $RESPONSE"
+
+          TOKEN=$(echo "$RESPONSE" | jq -r .token)
+
+          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+            echo "Failed to get registration token. Response:"
+            echo "$RESPONSE" | jq .
+            exit 1
+          fi
+
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          echo "Successfully obtained registration token"
 
       - name: Create Spot VM
         id: create-vm
