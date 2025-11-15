@@ -131,7 +131,7 @@ jobs:
           exit 1
 
   # Build x86_64 wheels on self-hosted GCP runner
-  build-wheels:
+  build-wheels-manylinux-x86_64:
     needs: provision
     runs-on: [self-hosted, gcp, spot]
     steps:
@@ -152,7 +152,7 @@ jobs:
       - name: Build manylinux Docker image
         run: |
           docker build \
-            -t jsrun-builder:x86_64 \
+            -t jsrun-manylinux-builder:x86_64 \
             -f .github/docker/Dockerfile.x86_64 \
             .github/docker/
 
@@ -162,7 +162,7 @@ jobs:
           docker run --rm \
             -v "$(pwd):/workdir" \
             -w /workdir \
-            jsrun-builder:x86_64 \
+            jsrun-manylinux-builder:x86_64 \
             bash .github/scripts/build-wheels.sh x86_64-unknown-linux-gnu
 
       - name: List built wheels
@@ -176,9 +176,55 @@ jobs:
           name: wheels-linux-x86_64
           path: dist/*.whl
 
+  # Build aarch64 wheels on self-hosted GCP runner
+  build-wheels-manylinux-aarch64:
+    needs: [provision, build-wheels-manylinux-x86_64]
+    runs-on: [self-hosted, gcp, spot]
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Verify runner environment
+        run: |
+          echo "Building wheels for aarch64"
+          echo "Runner name: ${{ runner.name }}"
+          echo "Runner OS: ${{ runner.os }}"
+          echo "Branch: ${{ github.ref }}"
+          echo "Commit: ${{ github.sha }}"
+          uname -a
+          df -h
+          free -h
+          docker --version
+
+      - name: Build manylinux Docker image
+        run: |
+          docker build \
+            -t jsrun-manylinux-builder:aarch64 \
+            -f .github/docker/Dockerfile.aarch64 \
+            .github/docker/
+
+      - name: Build wheels in Docker
+        run: |
+          mkdir -p dist
+          docker run --rm \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            jsrun-manylinux-builder:aarch64 \
+            bash .github/scripts/build-wheels.sh aarch64-unknown-linux-gnu
+
+      - name: List built wheels
+        run: |
+          echo "Built wheels:"
+          ls -lh dist/
+
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-aarch64
+          path: dist/*.whl
+
   # Cleanup: Delete the GCP VM
   cleanup:
-    needs: [provision, build-wheels]
+    needs: [provision, build-wheels-manylinux-x86_64, build-wheels-manylinux-aarch64]
     if: always()
     runs-on: ubuntu-latest
     steps:

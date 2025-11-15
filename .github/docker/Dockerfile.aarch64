@@ -1,0 +1,63 @@
+FROM ghcr.io/rust-cross/manylinux_2_28-cross:aarch64
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install toolchain pieces needed to build V8 with libc++
+RUN echo "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main" > /etc/apt/sources.list.d/llvm-toolchain-jammy-19.list && \
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor > /etc/apt/trusted.gpg.d/llvm-snapshot.gpg && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        lld-19 \
+        clang-19 \
+        clang-tools-19 \
+        clang-tidy-19 \
+        clang-format-19 \
+        libc++-19-dev \
+        libc++abi-19-dev \
+        libclang-19-dev \
+        libclang-rt-19-dev \
+        libglib2.0-dev \
+        python3.11 \
+        git && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set Clang 19 as default for host builds (V8 compiles host tools with host compiler)
+ENV CC=clang-19
+ENV CXX=clang-19
+ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
+ENV PATH=/usr/lib/llvm-19/bin:${PATH}
+
+# Keep the aarch64 sysroot provided by the cross toolchain so V8 links
+# against glibc 2.28 rather than the host.
+ENV TARGET_SYSROOT=/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot
+ENV EXTRA_GN_ARGS="target_sysroot=\"/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot\" treat_warnings_as_errors=false use_glib=false"
+ENV QEMU_LD_PREFIX=/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot
+ENV PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot
+ENV PKG_CONFIG_PATH=/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/lib/pkgconfig:/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/share/pkgconfig
+ENV BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_gnu="--sysroot=/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot -Ithird_party/libc++/src/include -Ithird_party/libc++abi/src/include -Ibuildtools/third_party/libc++ -isystem/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/include -isystem/usr/aarch64-unknown-linux-gnu/aarch64-unknown-linux-gnu/sysroot/usr/include/aarch64-linux-gnu"
+ENV CC_aarch64_unknown_linux_gnu=aarch64-unknown-linux-gnu-gcc
+ENV CXX_aarch64_unknown_linux_gnu=aarch64-unknown-linux-gnu-g++
+ENV AR_aarch64_unknown_linux_gnu=aarch64-unknown-linux-gnu-ar
+ENV CARGO_BUILD_TARGET=aarch64-unknown-linux-gnu
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-unknown-linux-gnu-gcc
+
+# Install Rust using rustup
+RUN curl --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+
+ENV PATH="/root/.cargo/bin:/root/.local/bin:${PATH}"
+
+# Install uv and maturin
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    uv tool install maturin
+
+# Add aarch64 target to the Rust toolchain
+RUN rustup target add aarch64-unknown-linux-gnu
+
+# V8 build settings
+ENV V8_FROM_SOURCE=1
+ENV GN_ARGS="use_custom_libcxx=true v8_monolithic=true v8_monolithic_for_shared_library=true"
+
+WORKDIR /workdir
+
+CMD ["/bin/bash"]
