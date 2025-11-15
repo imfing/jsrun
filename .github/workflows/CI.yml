@@ -150,8 +150,8 @@ jobs:
           df -h
           free -h
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Set up Docker
+        uses: docker/setup-docker-action@v4
 
       - name: Build manylinux Docker image
         run: |
