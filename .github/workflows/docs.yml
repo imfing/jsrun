@@ -31,10 +31,10 @@ jobs:
       - uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
-        run: uv sync --no-install-project --group docs # only install docs dependencies
+        run: uv sync --no-install-project --group docs
 
       - name: Build documentation
-        run: make docs
+        run: source .venv/bin/activate && mkdocs build
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v4
