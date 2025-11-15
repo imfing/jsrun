@@ -107,12 +107,12 @@ jobs:
 
           gcloud compute instances create $RUNNER_NAME \
             --zone=${{ vars.GCP_ZONE || 'us-central1-a' }} \
-            --machine-type=${{ vars.GCP_MACHINE_TYPE || 'n2-standard-2' }} \
+            --machine-type=${{ vars.GCP_MACHINE_TYPE || 'n2-highcpu-32' }} \
             --provisioning-model=SPOT \
             --instance-termination-action=DELETE \
             --image-family=ubuntu-2204-lts \
             --image-project=ubuntu-os-cloud \
-            --boot-disk-size=50GB \
+            --boot-disk-size=200GB \
             --metadata=runner-token=${{ steps.get-token.outputs.token }},repo-url=https://github.com/${{ github.repository }},runner-name=$RUNNER_NAME \
             --metadata-from-file=startup-script=.github/scripts/startup.sh
 
