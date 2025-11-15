@@ -60,10 +60,12 @@ lint: lint-python lint-rust
 
 .PHONY: test  ## Run all tests
 test:
+	uv sync --frozen --group testing
 	uv run python -m pytest tests/ -v
 
 .PHONY: test-quiet  ## Run tests quietly
 test-quiet:
+	uv sync --frozen --group testing
 	uv run python -m pytest tests/ -q
 
 .PHONY: docs  ## Build the documentation
