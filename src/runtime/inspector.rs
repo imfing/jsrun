@@ -9,10 +9,7 @@ use deno_core::futures::channel::oneshot;
 use deno_core::futures::future;
 use deno_core::futures::prelude::*;
 use deno_core::unsync::spawn;
-use deno_core::{
-    InspectorMsg, InspectorSessionKind, InspectorSessionOptions, InspectorSessionProxy,
-    JsRuntimeInspector,
-};
+use deno_core::{InspectorMsg, InspectorSessionKind, InspectorSessionProxy, JsRuntimeInspector};
 use fastwebsockets::upgrade::upgrade;
 use fastwebsockets::{Frame, OpCode, WebSocket};
 use hyper::body::Bytes;
@@ -115,18 +112,12 @@ impl InspectorServer {
 
     pub fn register_runtime(
         &self,
-        inspector: Rc<RefCell<JsRuntimeInspector>>,
+        inspector: Rc<JsRuntimeInspector>,
         params: InspectorRegistrationParams,
         connection_state: InspectorConnectionState,
     ) -> Result<InspectorRegistration> {
-        let session_sender = {
-            let inspector_ref = inspector.borrow();
-            inspector_ref.get_session_sender()
-        };
-        let deregister_rx = {
-            let mut inspector_ref = inspector.borrow_mut();
-            inspector_ref.add_deregister_handler()
-        };
+        let session_sender = inspector.get_session_sender();
+        let deregister_rx = inspector.add_deregister_handler();
 
         let info = InspectorInfo::new(
             self.host,
@@ -219,10 +210,8 @@ fn handle_ws_request(
         let proxy = InspectorSessionProxy {
             tx: outbound_tx,
             rx: inbound_rx,
-            options: InspectorSessionOptions {
-                kind: InspectorSessionKind::NonBlocking {
-                    wait_for_disconnect: true,
-                },
+            kind: InspectorSessionKind::NonBlocking {
+                wait_for_disconnect: true,
             },
         };
 

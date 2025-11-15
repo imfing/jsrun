@@ -162,7 +162,7 @@ struct JsStreamEntry {
 }
 
 impl JsStreamEntry {
-    fn new(scope: &mut v8::HandleScope<'_>, value: v8::Local<'_, v8::Value>) -> Self {
+    fn new(scope: &mut v8::PinScope<'_, '_>, value: v8::Local<'_, v8::Value>) -> Self {
         Self {
             stream: v8::Global::new(scope, value),
             reader: None,
@@ -193,7 +193,7 @@ impl JsStreamRegistry {
 
     pub fn register_stream(
         &self,
-        scope: &mut v8::HandleScope<'_>,
+        scope: &mut v8::PinScope<'_, '_>,
         stream_value: v8::Local<'_, v8::Value>,
     ) -> u32 {
         let id = self.next_id.get();
@@ -220,7 +220,7 @@ impl JsStreamRegistry {
 
     pub fn ensure_reader<'s>(
         &self,
-        scope: &mut v8::HandleScope<'s>,
+        scope: &mut v8::PinScope<'s, '_>,
         stream_id: u32,
     ) -> RuntimeResult<v8::Local<'s, v8::Object>> {
         let mut entries = self.entries.borrow_mut();
@@ -253,7 +253,7 @@ impl JsStreamRegistry {
 
     pub fn start_read(
         &self,
-        scope: &mut v8::HandleScope<'_>,
+        scope: &mut v8::PinScope<'_, '_>,
         stream_id: u32,
     ) -> RuntimeResult<v8::Global<v8::Promise>> {
         let reader = self.ensure_reader(scope, stream_id)?;

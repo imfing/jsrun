@@ -1,7 +1,8 @@
 //! Module loader that delegates resolution and loading to Python callables.
 
 use deno_core::{
-    ModuleLoader, ModuleSource, ModuleSourceCode, ModuleSpecifier, ModuleType, RequestedModuleType,
+    ModuleLoadOptions, ModuleLoadReferrer, ModuleLoader, ModuleSource, ModuleSourceCode,
+    ModuleSpecifier, ModuleType, RequestedModuleType,
 };
 use deno_error::JsErrorBox;
 use futures::FutureExt;
@@ -94,6 +95,16 @@ impl PythonModuleLoader {
             Some(format!("jsrun://static/{}", bare_specifier))
         } else {
             None
+        }
+    }
+
+    fn module_type_from_request(requested: &RequestedModuleType) -> ModuleType {
+        match requested {
+            RequestedModuleType::Json => ModuleType::Json,
+            RequestedModuleType::Text => ModuleType::Text,
+            RequestedModuleType::Bytes => ModuleType::Bytes,
+            RequestedModuleType::Other(ty) => ModuleType::Other(ty.clone()),
+            _ => ModuleType::JavaScript,
         }
     }
 }
@@ -205,12 +216,12 @@ impl ModuleLoader for PythonModuleLoader {
     /// Returns an error if loading fails or loader throws.
     fn load(
         &self,
-        module_specifier: &deno_core::url::Url,
-        _maybe_referrer: Option<&deno_core::url::Url>,
-        _is_dyn_import: bool,
-        _requested_module_type: RequestedModuleType,
+        module_specifier: &ModuleSpecifier,
+        _maybe_referrer: Option<&ModuleLoadReferrer>,
+        options: ModuleLoadOptions,
     ) -> deno_core::ModuleLoadResponse {
         let specifier = module_specifier.as_str();
+        let module_type = Self::module_type_from_request(&options.requested_module_type);
         let inner = self.inner.borrow();
 
         // Handle static modules (jsrun://static/module_name)
@@ -218,7 +229,7 @@ impl ModuleLoader for PythonModuleLoader {
             let name = specifier.strip_prefix("jsrun://static/").unwrap();
             if let Some(source) = inner.static_modules.get(name) {
                 let module = ModuleSource::new(
-                    ModuleType::JavaScript,
+                    module_type.clone(),
                     ModuleSourceCode::String(source.clone().into()),
                     module_specifier,
                     None,
@@ -240,6 +251,7 @@ impl ModuleLoader for PythonModuleLoader {
             let task_locals = self.task_locals.borrow().clone();
             let specifier_string = specifier.to_string();
             let module_specifier_owned = module_specifier.clone();
+            let requested_module_type = module_type.clone();
 
             return deno_core::ModuleLoadResponse::Async(Box::pin(async move {
                 let source_obj = if let Some(ref locals) = task_locals {
@@ -366,7 +378,7 @@ impl ModuleLoader for PythonModuleLoader {
                 })?;
 
                 let module = ModuleSource::new(
-                    ModuleType::JavaScript,
+                    requested_module_type,
                     ModuleSourceCode::String(source.into()),
                     &module_specifier_owned,
                     None,

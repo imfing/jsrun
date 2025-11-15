@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = "1.0"
-deno_core = "0.356.0"
+deno_core = "0.368.0"
 deno_error = "0.7.0"
 fastwebsockets = { version = "0.10.0", features = ["upgrade", "unstable-split"] }
 futures = "0.3"
