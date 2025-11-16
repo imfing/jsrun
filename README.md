@@ -1,7 +1,7 @@
 <div align="center">
   <a href="https://github.com/imfing/jsrun">
     <picture>
-      <img alt="jsrun" width="100" src="docs/assets/logo.svg"  >
+      <img alt="jsrun" width="100" src="docs/assets/logo.png"  >
     </picture>
   </a>
 
