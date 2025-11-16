@@ -23,7 +23,21 @@ cargo --version
 echo "Maturin version:"
 maturin --version
 
+# Patch Cargo.toml to use V8 from git (fixes missing files in crates.io package)
+echo ""
+echo "Patching Cargo.toml to use V8 from git..."
+if ! grep -q "\[patch.crates-io\]" Cargo.toml; then
+  echo "" >> Cargo.toml
+  echo "# Patched by build script: use V8 from git instead of crates.io" >> Cargo.toml
+  echo "[patch.crates-io]" >> Cargo.toml
+  echo 'v8 = { git = "https://github.com/denoland/rusty_v8", tag = "v142.1.0" }' >> Cargo.toml
+  echo "✓ Applied V8 git patch to Cargo.toml"
+else
+  echo "✓ V8 patch already exists in Cargo.toml"
+fi
+
 # Build wheels
+echo ""
 echo "Starting maturin build..."
 maturin build \
   --target "${TARGET_ARCH}" \

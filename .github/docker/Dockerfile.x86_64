@@ -2,6 +2,44 @@
 
 FROM ghcr.io/rust-cross/manylinux_2_28-cross:x86_64
 
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Clang 19 and build dependencies for V8
+RUN echo "deb https://apt.llvm.org/jammy/ llvm-toolchain-jammy-19 main" > /etc/apt/sources.list.d/llvm-toolchain-jammy-19.list && \
+    curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor > /etc/apt/trusted.gpg.d/llvm-snapshot.gpg && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        lld-19 \
+        clang-19 \
+        clang-tools-19 \
+        clang-tidy-19 \
+        clang-format-19 \
+        libc++-19-dev \
+        libc++abi-19-dev \
+        libclang-19-dev \
+        libclang-rt-19-dev \
+        libglib2.0-dev \
+        python3.11 \
+        git && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Set Clang 19 as default
+ENV CC=clang-19
+ENV CXX=clang-19
+ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
+ENV PATH=/usr/lib/llvm-19/bin:${PATH}
+
+# For x86_64 native build: configure bindgen to find both V8's custom libc++ and system headers
+# Relative paths (third_party/*) are resolved from V8 source during build
+# System paths provide standard C library headers (stdint.h, etc.)
+ENV BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu="\
+-Ithird_party/libc++/src/include \
+-Ithird_party/libc++abi/src/include \
+-Ibuildtools/third_party/libc++ \
+-isystem/usr/include \
+-isystem/usr/include/x86_64-linux-gnu"
+
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 ENV PATH="/root/.cargo/bin:/root/.local/bin:$PATH"
@@ -14,20 +52,15 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 RUN /root/.local/bin/uv tool install maturin
 ENV PATH="/root/.local/share/uv/tools/maturin/bin:$PATH"
 
-# Install build dependencies for V8
-RUN apt-get update && \
-    apt-get install -y \
-    git \
-    clang \
-    libclang-dev \
-    llvm-dev \
-    pkg-config \
-    libglib2.0-dev && \
-    rm -rf /var/lib/apt/lists/*
-
 # Set V8 build environment variables
 ENV V8_FROM_SOURCE=1
-ENV GN_ARGS="use_custom_libcxx=false v8_monolithic=true v8_monolithic_for_shared_library=true"
+# use_custom_libcxx=true: Use V8's bundled libc++
+# clang_use_chrome_plugins=false: Disable Chrome-specific Clang plugins
+# is_clang=true: Use Clang toolchain
+# use_lld=true: Use LLD linker
+# treat_warnings_as_errors=false: Don't fail on warnings
+# use_glib=false: Don't depend on glib
+ENV GN_ARGS="use_custom_libcxx=true clang_use_chrome_plugins=false is_clang=true use_lld=true treat_warnings_as_errors=false use_glib=false v8_monolithic=true v8_monolithic_for_shared_library=true"
 
 WORKDIR /workdir
 
