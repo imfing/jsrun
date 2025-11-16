@@ -1,23 +1,18 @@
 name: CI
 
 on:
-  # push:
-  #   branches:
-  #     - main
-  #     - master
-  #   tags:
-  #     - '*'
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
-  contents: read
-  id-token: write  # Required for Workload Identity Federation
+  contents: write  # Required for creating releases
+  id-token: write  # Required for Workload Identity Federation and PyPI trusted publishing
 
 jobs:
 
-  # Disabled for testing self-hosted runner flow
   macos:
-    if: false
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -43,9 +38,7 @@ jobs:
           name: wheels-macos-${{ matrix.platform.target }}
           path: dist
 
-  # Disabled for testing self-hosted runner flow
   sdist:
-    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -213,3 +206,56 @@ jobs:
           gcloud compute instances delete ${{ needs.provision.outputs.runner-name }} \
             --zone=${{ vars.GCP_ZONE || 'us-central1-a' }} \
             --quiet || echo "VM may have already been terminated"
+
+  # Create GitHub Release with all artifacts
+  release:
+    needs: [macos, sdist, build-wheels-manylinux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          find artifacts -name '*.whl' -exec cp {} release-assets/ \;
+          find artifacts -name '*.tar.gz' -exec cp {} release-assets/ \;
+          ls -lh release-assets/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+
+  # Publish to PyPI using trusted publishing
+  publish:
+    needs: [release]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    environment:
+      name: pypi
+      url: https://pypi.org/p/jsrun
+    permissions:
+      id-token: write  # Required for PyPI trusted publishing
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare distribution files
+        run: |
+          mkdir -p dist
+          find artifacts -name '*.whl' -exec cp {} dist/ \;
+          find artifacts -name '*.tar.gz' -exec cp {} dist/ \;
+          ls -lh dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
