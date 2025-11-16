@@ -188,6 +188,66 @@ jobs:
           name: wheels-linux-manylinux
           path: dist/*.whl
 
+  # Test built manylinux wheels on GitHub ubuntu runners
+  test-wheels-x86_64:
+    needs: build-wheels-manylinux
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Download manylinux wheels
+        uses: actions/download-artifact@v6
+        with:
+          name: wheels-linux-manylinux
+          path: dist
+      - name: Install and test wheel
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL=$(ls dist/*cp$(echo ${{ matrix.python-version }} | tr -d '.')*x86_64.whl | head -n 1)
+          echo "Installing wheel: $WHEEL"
+          pip install "$WHEEL"
+          pip install pytest pytest-asyncio
+          pytest tests/ -v
+
+  test-wheels-aarch64:
+    needs: build-wheels-manylinux
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v5
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - name: Download manylinux wheels
+        uses: actions/download-artifact@v6
+        with:
+          name: wheels-linux-manylinux
+          path: dist
+      - name: Test wheel in aarch64 container
+        run: |
+          WHEEL=$(ls dist/*cp$(echo ${{ matrix.python-version }} | tr -d '.')*aarch64.whl | head -n 1)
+          echo "Testing wheel: $WHEEL"
+          docker run --rm --platform linux/arm64 \
+            -v "$(pwd):/work" \
+            -w /work \
+            python:${{ matrix.python-version }}-slim \
+            bash -c "
+              pip install --upgrade pip && \
+              pip install $WHEEL && \
+              pip install pytest pytest-asyncio && \
+              pytest tests/ -v
+            "
+
   # Cleanup: Delete the GCP VM
   cleanup:
     needs: [provision, build-wheels-manylinux]
@@ -209,14 +269,14 @@ jobs:
 
   # Create GitHub Release with all artifacts
   release:
-    needs: [macos, sdist, build-wheels-manylinux]
+    needs: [macos, sdist, build-wheels-manylinux, test-wheels-x86_64, test-wheels-aarch64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: artifacts
 
