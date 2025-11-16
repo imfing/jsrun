@@ -17,6 +17,7 @@ ENV PATH="/root/.local/share/uv/tools/maturin/bin:$PATH"
 # Install build dependencies for V8
 RUN apt-get update && \
     apt-get install -y \
+    git \
     clang \
     libclang-dev \
     llvm-dev \

@@ -13,6 +13,7 @@ permissions:
 jobs:
 
   macos:
+    if: false
     runs-on: ${{ matrix.platform.runner }}
     strategy:
       matrix:
@@ -39,6 +40,7 @@ jobs:
           path: dist
 
   sdist:
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
