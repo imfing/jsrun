@@ -271,7 +271,7 @@ This is perfect for interactive sessions or simple scripts where you don't need 
 
 **Bind early**: Set up all your bindings before running complex JavaScript. It's cleaner and easier to debug.
 
-**Use meaningful names**: JavaScript developers will see your function namesmake them clear and follow JavaScript conventions (`camelCase`).
+**Use meaningful names**: Make function names clear and follow JavaScript conventions (`camelCase`).
 
 **Don't bind everything**: Only expose what JavaScript actually needs. Keep your API surface small.
 

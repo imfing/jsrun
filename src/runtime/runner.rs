@@ -1060,7 +1060,7 @@ impl RuntimeJob for EvalAsyncJob {
 
                 // Resolve the value to a promise
                 // The resolve() call wraps the value in a promise if it isn't already one
-                let scope = &mut core.js_runtime.handle_scope();
+                deno_core::scope!(scope, core.js_runtime);
                 let local_value = v8::Local::new(scope, global_value);
 
                 // Check if it's already a promise
@@ -1091,7 +1091,7 @@ impl RuntimeJob for EvalAsyncJob {
             EvalAsyncJobState::Waiting { promise } => {
                 // Check the promise state (dispatcher has been driving the event loop)
                 let promise_state = {
-                    let scope = &mut core.js_runtime.handle_scope();
+                    deno_core::scope!(scope, core.js_runtime);
                     let promise_local: v8::Local<v8::Promise> = v8::Local::new(scope, &*promise);
                     promise_local.state()
                 };
@@ -1107,7 +1107,7 @@ impl RuntimeJob for EvalAsyncJob {
                         let next_fn_id = core.next_fn_id.clone();
                         let limits = core.serialization_limits;
                         let stream_registry = core.js_stream_registry.clone();
-                        let scope = &mut core.js_runtime.handle_scope();
+                        deno_core::scope!(scope, core.js_runtime);
                         let promise_local: v8::Local<v8::Promise> =
                             v8::Local::new(scope, &*promise);
                         let result_value = promise_local.result(scope);
@@ -1125,7 +1125,7 @@ impl RuntimeJob for EvalAsyncJob {
                     v8::PromiseState::Rejected => {
                         // Promise was rejected - extract error while scope is active
                         let js_error = {
-                            let scope = &mut core.js_runtime.handle_scope();
+                            deno_core::scope!(scope, core.js_runtime);
                             let promise_local: v8::Local<v8::Promise> =
                                 v8::Local::new(scope, &*promise);
                             let exception = promise_local.result(scope);
@@ -1189,7 +1189,7 @@ impl RuntimeJob for StreamReadJob {
         match &mut self.state {
             StreamReadJobState::Init => {
                 let promise = {
-                    let scope = &mut core.js_runtime.handle_scope();
+                    deno_core::scope!(scope, core.js_runtime);
                     core.js_stream_registry.start_read(scope, self.stream_id)
                 };
 
@@ -1206,7 +1206,7 @@ impl RuntimeJob for StreamReadJob {
             }
             StreamReadJobState::Waiting { promise } => {
                 let promise_state = {
-                    let scope = &mut core.js_runtime.handle_scope();
+                    deno_core::scope!(scope, core.js_runtime);
                     let promise_local: v8::Local<v8::Promise> = v8::Local::new(scope, &*promise);
                     promise_local.state()
                 };
@@ -1216,7 +1216,7 @@ impl RuntimeJob for StreamReadJob {
                     v8::PromiseState::Fulfilled => {
                         let chunk_js_value = {
                             let stream_registry = core.js_stream_registry.clone();
-                            let scope = &mut core.js_runtime.handle_scope();
+                            deno_core::scope!(scope, core.js_runtime);
                             let promise_local: v8::Local<v8::Promise> =
                                 v8::Local::new(scope, &*promise);
                             let chunk_value = promise_local.result(scope);
@@ -1242,7 +1242,7 @@ impl RuntimeJob for StreamReadJob {
                     }
                     v8::PromiseState::Rejected => {
                         let js_error = {
-                            let scope = &mut core.js_runtime.handle_scope();
+                            deno_core::scope!(scope, core.js_runtime);
                             let promise_local: v8::Local<v8::Promise> =
                                 v8::Local::new(scope, &*promise);
                             let exception = promise_local.result(scope);
@@ -1437,7 +1437,7 @@ impl RuntimeJob for EvalModuleAsyncJob {
                         })?;
 
                 let stream_registry = core.js_stream_registry.clone();
-                let scope = &mut core.js_runtime.handle_scope();
+                deno_core::scope!(scope, core.js_runtime);
                 let local = v8::Local::new(scope, module_namespace);
                 let value: v8::Local<'_, v8::Value> = local.into();
                 let result = RuntimeCoreState::value_to_js_value(
@@ -1570,18 +1570,18 @@ impl RuntimeJob for CallFunctionAsyncJob {
 
                 let promise_result: Result<Result<v8::Global<v8::Promise>, JsError>, RuntimeError> =
                     (|| {
-                        let scope = &mut core.js_runtime.handle_scope();
-                        let mut try_catch = v8::TryCatch::new(scope);
+                        deno_core::scope!(scope, core.js_runtime);
+                        v8::tc_scope!(let try_catch, scope);
 
                         // Get function and receiver from registry
                         let (func, receiver) = {
                             let registry = core.fn_registry.borrow();
                             let stored = registry.get(&self.fn_id).unwrap(); // Safe: checked above
-                            let func = v8::Local::new(&mut try_catch, &stored.function);
+                            let func = v8::Local::new(try_catch, &stored.function);
                             let receiver = stored
                                 .receiver
                                 .as_ref()
-                                .map(|r| v8::Local::new(&mut try_catch, r));
+                                .map(|r| v8::Local::new(try_catch, r));
                             (func, receiver)
                         };
 
@@ -1590,21 +1590,18 @@ impl RuntimeJob for CallFunctionAsyncJob {
                         for arg in &self.args {
                             let v8_val = RuntimeCoreState::js_value_to_v8(
                                 &core.fn_registry,
-                                &mut try_catch,
+                                try_catch,
                                 arg,
                             )?;
                             v8_args.push(v8_val);
                         }
 
                         let call_receiver = receiver.unwrap_or_else(|| {
-                            try_catch
-                                .get_current_context()
-                                .global(&mut try_catch)
-                                .into()
+                            try_catch.get_current_context().global(try_catch).into()
                         });
 
                         // Call the function and convert result to promise
-                        match func.call(&mut try_catch, call_receiver, &v8_args) {
+                        match func.call(try_catch, call_receiver, &v8_args) {
                             Some(result_value) => {
                                 // Check if result is a promise and wrap if needed
                                 let promise = if result_value.is_promise() {
@@ -1613,21 +1610,20 @@ impl RuntimeJob for CallFunctionAsyncJob {
                                     )?
                                 } else {
                                     // Not a promise - wrap in resolved promise
-                                    let resolver = v8::PromiseResolver::new(&mut try_catch)
-                                        .ok_or_else(|| {
+                                    let resolver =
+                                        v8::PromiseResolver::new(try_catch).ok_or_else(|| {
                                             RuntimeError::internal(
                                                 "Failed to create PromiseResolver",
                                             )
                                         })?;
-                                    resolver.resolve(&mut try_catch, result_value);
-                                    resolver.get_promise(&mut try_catch)
+                                    resolver.resolve(try_catch, result_value);
+                                    resolver.get_promise(try_catch)
                                 };
-                                Ok(Ok(v8::Global::new(&mut try_catch, promise)))
+                                Ok(Ok(v8::Global::new(try_catch, promise)))
                             }
                             None => match try_catch.exception() {
                                 Some(exception) => {
-                                    let js_error =
-                                        JsError::from_v8_exception(&mut try_catch, exception);
+                                    let js_error = JsError::from_v8_exception(try_catch, exception);
                                     Ok(Err(*js_error))
                                 }
                                 None => Err(RuntimeError::internal(
@@ -1656,7 +1652,7 @@ impl RuntimeJob for CallFunctionAsyncJob {
             CallFunctionAsyncJobState::Waiting { promise } => {
                 // Check promise state
                 let promise_state = {
-                    let scope = &mut core.js_runtime.handle_scope();
+                    deno_core::scope!(scope, core.js_runtime);
                     let promise_local: v8::Local<v8::Promise> = v8::Local::new(scope, &*promise);
                     promise_local.state()
                 };
@@ -1668,7 +1664,7 @@ impl RuntimeJob for CallFunctionAsyncJob {
                         let next_fn_id = core.next_fn_id.clone();
                         let limits = core.serialization_limits;
                         let stream_registry = core.js_stream_registry.clone();
-                        let scope = &mut core.js_runtime.handle_scope();
+                        deno_core::scope!(scope, core.js_runtime);
                         let promise_local: v8::Local<v8::Promise> =
                             v8::Local::new(scope, &*promise);
                         let result_value = promise_local.result(scope);
@@ -1685,7 +1681,7 @@ impl RuntimeJob for CallFunctionAsyncJob {
                     }
                     v8::PromiseState::Rejected => {
                         let js_error = {
-                            let scope = &mut core.js_runtime.handle_scope();
+                            deno_core::scope!(scope, core.js_runtime);
                             let promise_local: v8::Local<v8::Promise> =
                                 v8::Local::new(scope, &*promise);
                             let exception = promise_local.result(scope);
@@ -1784,7 +1780,7 @@ impl RuntimeJob for ResumeFunctionCallJob {
                 }
                 ResumeFunctionCallJobState::Waiting => {
                     let promise_state = {
-                        let scope = &mut core.js_runtime.handle_scope();
+                        deno_core::scope!(scope, core.js_runtime);
                         let promise_local: v8::Local<v8::Promise> =
                             v8::Local::new(scope, &self.promise);
                         promise_local.state()
@@ -1797,7 +1793,7 @@ impl RuntimeJob for ResumeFunctionCallJob {
                             let next_fn_id = core.next_fn_id.clone();
                             let limits = core.serialization_limits;
                             let stream_registry = core.js_stream_registry.clone();
-                            let scope = &mut core.js_runtime.handle_scope();
+                            deno_core::scope!(scope, core.js_runtime);
                             let promise_local: v8::Local<v8::Promise> =
                                 v8::Local::new(scope, &self.promise);
                             let result_value = promise_local.result(scope);
@@ -1814,7 +1810,7 @@ impl RuntimeJob for ResumeFunctionCallJob {
                         }
                         v8::PromiseState::Rejected => {
                             let js_error = {
-                                let scope = &mut core.js_runtime.handle_scope();
+                                deno_core::scope!(scope, core.js_runtime);
                                 let promise_local: v8::Local<v8::Promise> =
                                     v8::Local::new(scope, &self.promise);
                                 let exception = promise_local.result(scope);
@@ -2146,11 +2142,10 @@ impl RuntimeCoreState {
             }
             if state.wait_for_connection || state.break_on_next_statement {
                 let inspector = self.js_runtime.inspector();
-                let mut inspector_ref = inspector.borrow_mut();
                 if state.break_on_next_statement {
-                    inspector_ref.wait_for_session_and_break_on_next_statement();
+                    inspector.wait_for_session_and_break_on_next_statement();
                 } else if state.wait_for_connection {
-                    inspector_ref.wait_for_session();
+                    inspector.wait_for_session();
                 }
             }
             state.has_waited = true;
@@ -2194,7 +2189,7 @@ impl RuntimeCoreState {
     }
 
     fn is_readable_stream(
-        scope: &mut v8::HandleScope<'_>,
+        scope: &mut v8::PinScope<'_, '_>,
         value: v8::Local<'_, v8::Value>,
     ) -> bool {
         if !value.is_object() {
@@ -2380,31 +2375,31 @@ impl RuntimeCoreState {
         name: String,
         properties: Vec<BoundObjectProperty>,
     ) -> RuntimeResult<()> {
-        let scope = &mut self.js_runtime.handle_scope();
-        let mut try_catch = v8::TryCatch::new(scope);
+        deno_core::scope!(scope, self.js_runtime);
+        v8::tc_scope!(let try_catch, scope);
         let context = try_catch.get_current_context();
-        let global = context.global(&mut try_catch);
+        let global = context.global(try_catch);
 
-        let helper_key = v8::String::new(&mut try_catch, "__jsrun_bind_object")
+        let helper_key = v8::String::new(try_catch, "__jsrun_bind_object")
             .ok_or_else(|| RuntimeError::internal("Failed to allocate helper name"))?;
         let helper_value = global
-            .get(&mut try_catch, helper_key.into())
+            .get(try_catch, helper_key.into())
             .ok_or_else(|| RuntimeError::internal("Missing __jsrun_bind_object helper"))?;
         let helper_fn = v8::Local::<v8::Function>::try_from(helper_value)
             .map_err(|_| RuntimeError::internal("__jsrun_bind_object is not callable"))?;
 
-        let global_name = v8::String::new(&mut try_catch, &name)
+        let global_name = v8::String::new(try_catch, &name)
             .ok_or_else(|| RuntimeError::internal("Failed to allocate target name"))?;
 
-        let assignments = v8::Array::new(&mut try_catch, properties.len() as i32);
+        let assignments = v8::Array::new(try_catch, properties.len() as i32);
 
         for (index, entry) in properties.into_iter().enumerate() {
-            let entry_obj = v8::Object::new(&mut try_catch);
+            let entry_obj = v8::Object::new(try_catch);
 
-            let key_literal = v8::String::new(&mut try_catch, "key")
+            let key_literal = v8::String::new(try_catch, "key")
                 .ok_or_else(|| RuntimeError::internal("Failed to allocate 'key' literal"))?;
             let key_value = v8::String::new(
-                &mut try_catch,
+                try_catch,
                 match &entry {
                     BoundObjectProperty::Value { key, .. }
                     | BoundObjectProperty::Op { key, .. } => key,
@@ -2412,31 +2407,27 @@ impl RuntimeCoreState {
             )
             .ok_or_else(|| RuntimeError::internal("Failed to allocate property name"))?;
             entry_obj
-                .set(&mut try_catch, key_literal.into(), key_value.into())
+                .set(try_catch, key_literal.into(), key_value.into())
                 .ok_or_else(|| RuntimeError::internal("Failed to set entry key"))?;
 
-            let kind_literal = v8::String::new(&mut try_catch, "kind")
+            let kind_literal = v8::String::new(try_catch, "kind")
                 .ok_or_else(|| RuntimeError::internal("Failed to allocate 'kind' literal"))?;
 
             match entry {
                 BoundObjectProperty::Value { key: _, value } => {
-                    let kind_value = v8::String::new(&mut try_catch, "value")
+                    let kind_value = v8::String::new(try_catch, "value")
                         .ok_or_else(|| RuntimeError::internal("Failed to allocate kind value"))?;
                     entry_obj
-                        .set(&mut try_catch, kind_literal.into(), kind_value.into())
+                        .set(try_catch, kind_literal.into(), kind_value.into())
                         .ok_or_else(|| RuntimeError::internal("Failed to set entry kind"))?;
 
-                    let value_literal =
-                        v8::String::new(&mut try_catch, "value").ok_or_else(|| {
-                            RuntimeError::internal("Failed to allocate 'value' literal")
-                        })?;
-                    let v8_value = RuntimeCoreState::js_value_to_v8(
-                        &self.fn_registry,
-                        &mut try_catch,
-                        &value,
-                    )?;
+                    let value_literal = v8::String::new(try_catch, "value").ok_or_else(|| {
+                        RuntimeError::internal("Failed to allocate 'value' literal")
+                    })?;
+                    let v8_value =
+                        RuntimeCoreState::js_value_to_v8(&self.fn_registry, try_catch, &value)?;
                     entry_obj
-                        .set(&mut try_catch, value_literal.into(), v8_value)
+                        .set(try_catch, value_literal.into(), v8_value)
                         .ok_or_else(|| RuntimeError::internal("Failed to set entry value"))?;
                 }
                 BoundObjectProperty::Op {
@@ -2444,27 +2435,25 @@ impl RuntimeCoreState {
                     op_id,
                     mode,
                 } => {
-                    let kind_value = v8::String::new(&mut try_catch, "op")
+                    let kind_value = v8::String::new(try_catch, "op")
                         .ok_or_else(|| RuntimeError::internal("Failed to allocate kind value"))?;
                     entry_obj
-                        .set(&mut try_catch, kind_literal.into(), kind_value.into())
+                        .set(try_catch, kind_literal.into(), kind_value.into())
                         .ok_or_else(|| RuntimeError::internal("Failed to set entry kind"))?;
 
-                    let op_id_literal =
-                        v8::String::new(&mut try_catch, "op_id").ok_or_else(|| {
-                            RuntimeError::internal("Failed to allocate 'op_id' literal")
-                        })?;
-                    let op_id_value = v8::Number::new(&mut try_catch, op_id as f64);
+                    let op_id_literal = v8::String::new(try_catch, "op_id").ok_or_else(|| {
+                        RuntimeError::internal("Failed to allocate 'op_id' literal")
+                    })?;
+                    let op_id_value = v8::Number::new(try_catch, op_id as f64);
                     entry_obj
-                        .set(&mut try_catch, op_id_literal.into(), op_id_value.into())
+                        .set(try_catch, op_id_literal.into(), op_id_value.into())
                         .ok_or_else(|| RuntimeError::internal("Failed to set op id"))?;
 
-                    let mode_literal =
-                        v8::String::new(&mut try_catch, "mode").ok_or_else(|| {
-                            RuntimeError::internal("Failed to allocate 'mode' literal")
-                        })?;
+                    let mode_literal = v8::String::new(try_catch, "mode").ok_or_else(|| {
+                        RuntimeError::internal("Failed to allocate 'mode' literal")
+                    })?;
                     let mode_value = v8::String::new(
-                        &mut try_catch,
+                        try_catch,
                         match mode {
                             PythonOpMode::Async => "async",
                             PythonOpMode::Sync => "sync",
@@ -2472,25 +2461,25 @@ impl RuntimeCoreState {
                     )
                     .ok_or_else(|| RuntimeError::internal("Failed to allocate mode value"))?;
                     entry_obj
-                        .set(&mut try_catch, mode_literal.into(), mode_value.into())
+                        .set(try_catch, mode_literal.into(), mode_value.into())
                         .ok_or_else(|| RuntimeError::internal("Failed to set mode"))?;
                 }
             }
 
             assignments
-                .set_index(&mut try_catch, index as u32, entry_obj.into())
+                .set_index(try_catch, index as u32, entry_obj.into())
                 .ok_or_else(|| RuntimeError::internal("Failed to store assignment entry"))?;
         }
 
         match helper_fn.call(
-            &mut try_catch,
+            try_catch,
             global.into(),
             &[global_name.into(), assignments.into()],
         ) {
             Some(_) => Ok(()),
             None => {
                 if let Some(exception) = try_catch.exception() {
-                    let js_error = JsError::from_v8_exception(&mut try_catch, exception);
+                    let js_error = JsError::from_v8_exception(try_catch, exception);
                     Err(RuntimeError::javascript(JsExceptionDetails::from_js_error(
                         *js_error,
                     )))
@@ -2526,7 +2515,7 @@ impl RuntimeCoreState {
             let next_fn_id = this.next_fn_id.clone();
             let limits = this.serialization_limits;
             let stream_registry = this.js_stream_registry.clone();
-            let scope = &mut this.js_runtime.handle_scope();
+            deno_core::scope!(scope, this.js_runtime);
             let local = v8::Local::new(scope, global_value);
             Self::value_to_js_value(
                 &fn_registry,
@@ -2600,7 +2589,7 @@ impl RuntimeCoreState {
             let next_fn_id = this.next_fn_id.clone();
             let limits = this.serialization_limits;
             let stream_registry = this.js_stream_registry.clone();
-            let scope = &mut this.js_runtime.handle_scope();
+            deno_core::scope!(scope, this.js_runtime);
             let namespace_obj = v8::Local::new(scope, module_namespace);
             let namespace_value: v8::Local<'_, v8::Value> = namespace_obj.into();
             Self::value_to_js_value(
@@ -2659,35 +2648,31 @@ impl RuntimeCoreState {
         }
 
         let call_outcome: Result<SyncCallOutcome, SyncCallError> = (|| {
-            let scope = &mut self.js_runtime.handle_scope();
-            let mut try_catch = v8::TryCatch::new(scope);
+            deno_core::scope!(scope, self.js_runtime);
+            v8::tc_scope!(let try_catch, scope);
 
             let (func, receiver) = {
                 let registry = self.fn_registry.borrow();
                 let stored = registry.get(&fn_id).unwrap();
-                let func = v8::Local::new(&mut try_catch, &stored.function);
+                let func = v8::Local::new(try_catch, &stored.function);
                 let receiver = stored
                     .receiver
                     .as_ref()
-                    .map(|recv| v8::Local::new(&mut try_catch, recv));
+                    .map(|recv| v8::Local::new(try_catch, recv));
                 (func, receiver)
             };
 
             let mut v8_args = Vec::with_capacity(args.len());
             for arg in &args {
-                let v8_val = RuntimeCoreState::js_value_to_v8(&fn_registry, &mut try_catch, arg)
+                let v8_val = RuntimeCoreState::js_value_to_v8(&fn_registry, try_catch, arg)
                     .map_err(SyncCallError::Runtime)?;
                 v8_args.push(v8_val);
             }
 
-            let call_receiver = receiver.unwrap_or_else(|| {
-                try_catch
-                    .get_current_context()
-                    .global(&mut try_catch)
-                    .into()
-            });
+            let call_receiver = receiver
+                .unwrap_or_else(|| try_catch.get_current_context().global(try_catch).into());
 
-            match func.call(&mut try_catch, call_receiver, &v8_args) {
+            match func.call(try_catch, call_receiver, &v8_args) {
                 Some(result_value) => {
                     try_catch.perform_microtask_checkpoint();
 
@@ -2701,15 +2686,15 @@ impl RuntimeCoreState {
 
                         match promise.state() {
                             v8::PromiseState::Pending => {
-                                let promise_global = v8::Global::new(&mut try_catch, promise);
+                                let promise_global = v8::Global::new(try_catch, promise);
                                 Ok(SyncCallOutcome::Pending(promise_global))
                             }
                             v8::PromiseState::Fulfilled => {
-                                let fulfilled_value = promise.result(&mut try_catch);
+                                let fulfilled_value = promise.result(try_catch);
                                 RuntimeCoreState::value_to_js_value(
                                     &fn_registry,
                                     &next_fn_id,
-                                    &mut try_catch,
+                                    try_catch,
                                     fulfilled_value,
                                     limits,
                                     stream_registry.clone(),
@@ -2718,9 +2703,8 @@ impl RuntimeCoreState {
                                 .map_err(SyncCallError::Runtime)
                             }
                             v8::PromiseState::Rejected => {
-                                let exception = promise.result(&mut try_catch);
-                                let js_error =
-                                    JsError::from_v8_exception(&mut try_catch, exception);
+                                let exception = promise.result(try_catch);
+                                let js_error = JsError::from_v8_exception(try_catch, exception);
                                 Err(SyncCallError::Js(*js_error))
                             }
                         }
@@ -2728,7 +2712,7 @@ impl RuntimeCoreState {
                         RuntimeCoreState::value_to_js_value(
                             &fn_registry,
                             &next_fn_id,
-                            &mut try_catch,
+                            try_catch,
                             result_value,
                             limits,
                             stream_registry,
@@ -2739,7 +2723,7 @@ impl RuntimeCoreState {
                 }
                 None => match try_catch.exception() {
                     Some(exception) => {
-                        let js_error = JsError::from_v8_exception(&mut try_catch, exception);
+                        let js_error = JsError::from_v8_exception(try_catch, exception);
                         Err(SyncCallError::Js(*js_error))
                     }
                     None => Err(SyncCallError::Runtime(RuntimeError::internal(
@@ -2777,7 +2761,7 @@ impl RuntimeCoreState {
 
     fn cancel_js_stream(&mut self, stream_id: u32) -> RuntimeResult<()> {
         {
-            let scope = &mut self.js_runtime.handle_scope();
+            deno_core::scope!(scope, self.js_runtime);
             if let Ok(reader) = self.js_stream_registry.ensure_reader(scope, stream_id) {
                 if let Some(cancel_key) = v8::String::new(scope, "cancel") {
                     if let Some(cancel_value) = reader.get(scope, cancel_key.into()) {
@@ -2826,7 +2810,7 @@ impl RuntimeCoreState {
     fn value_to_js_value<'s>(
         fn_registry: &Rc<RefCell<HashMap<u32, StoredFunction>>>,
         next_fn_id: &Rc<RefCell<u32>>,
-        scope: &mut v8::HandleScope<'s>,
+        scope: &mut v8::PinScope<'s, '_>,
         value: v8::Local<'s, v8::Value>,
         limits: SerializationLimits,
         stream_registry: Rc<JsStreamRegistry>,
@@ -2847,7 +2831,7 @@ impl RuntimeCoreState {
 
     fn js_value_to_v8<'s>(
         registry: &Rc<RefCell<HashMap<u32, StoredFunction>>>,
-        scope: &mut v8::HandleScope<'s>,
+        scope: &mut v8::PinScope<'s, '_>,
         value: &JSValue,
     ) -> RuntimeResult<v8::Local<'s, v8::Value>> {
         match value {
@@ -2956,7 +2940,7 @@ impl RuntimeCoreState {
     fn value_to_js_value_internal<'s>(
         fn_registry: &Rc<RefCell<HashMap<u32, StoredFunction>>>,
         next_fn_id: &Rc<RefCell<u32>>,
-        scope: &mut v8::HandleScope<'s>,
+        scope: &mut v8::PinScope<'s, '_>,
         value: v8::Local<'s, v8::Value>,
         seen: &mut HashSet<i32>,
         tracker: &mut LimitTracker,

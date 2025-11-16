@@ -687,6 +687,12 @@ impl RuntimeHandle {
     /// Returns an error if the shutdown command fails to send or confirm.
     pub fn close(&mut self) -> RuntimeResult<()> {
         let mut shutdown_guard = self.shutdown.lock().unwrap();
+        log::debug!(
+            "RuntimeHandle::close invoked (shutdown={}, termination_requested={}, terminated={})",
+            *shutdown_guard,
+            self.termination.is_requested(),
+            self.termination.is_terminated()
+        );
         if *shutdown_guard {
             return Ok(());
         }
@@ -711,13 +717,16 @@ impl RuntimeHandle {
             match result_rx.recv() {
                 Ok(_) => {
                     *shutdown_guard = true;
+                    log::debug!("RuntimeHandle::close completed shutdown");
                 }
                 Err(_) => {
+                    log::warn!("RuntimeHandle::close failed to confirm runtime shutdown");
                     return Err(RuntimeError::internal("Failed to confirm runtime shutdown"));
                 }
             }
         }
 
+        log::debug!("RuntimeHandle::close exit (shutdown={})", *shutdown_guard);
         Ok(())
     }
 

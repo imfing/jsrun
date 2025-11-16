@@ -95,7 +95,9 @@ with Runtime(config) as runtime:
     print(result)  # 1.0.0
 ```
 
-Exceeding the heap limit raises `RuntimeError` with "Heap limit exceeded".
+!!! warning "Heap Limit Considerations"
+    - Exceeding the heap limit raises `RuntimeError` with "Heap limit exceeded"
+    - Do not set the heap limit too low as it may prevent V8 from starting properly
 
 ## Running JavaScript Code
 

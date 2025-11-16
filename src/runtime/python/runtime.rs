@@ -680,16 +680,16 @@ impl JsFunction {
     }
 }
 
-#[pyclass(module = "_jsrun", name = "_JsFunctionFinalizer", unsendable)]
+#[pyclass(module = "_jsrun", name = "_JsFunctionFinalizer")]
 pub(crate) struct JsFunctionFinalizer {
-    handle: std::cell::RefCell<Option<RuntimeHandle>>,
+    handle: Mutex<Option<RuntimeHandle>>,
     fn_id: u32,
 }
 
 impl JsFunctionFinalizer {
     fn new(handle: RuntimeHandle, fn_id: u32) -> Self {
         Self {
-            handle: std::cell::RefCell::new(Some(handle)),
+            handle: Mutex::new(Some(handle)),
             fn_id,
         }
     }
@@ -698,7 +698,7 @@ impl JsFunctionFinalizer {
 #[pymethods]
 impl JsFunctionFinalizer {
     fn __call__(&self) {
-        let mut handle = self.handle.borrow_mut();
+        let mut handle = self.handle.lock().unwrap();
         if let Some(runtime_handle) = handle.take() {
             if !runtime_handle.is_function_tracked(self.fn_id) {
                 return;
@@ -858,7 +858,7 @@ impl JsStream {
     }
 }
 
-#[pyclass(module = "_jsrun", name = "_JsStreamFinalizer", unsendable)]
+#[pyclass(module = "_jsrun", name = "_JsStreamFinalizer")]
 pub(crate) struct JsStreamFinalizer {
     state: Arc<StreamSharedState>,
 }
@@ -949,16 +949,16 @@ impl PyStreamSource {
     }
 }
 
-#[pyclass(module = "_jsrun", name = "_PyStreamFinalizer", unsendable)]
+#[pyclass(module = "_jsrun", name = "_PyStreamFinalizer")]
 pub(crate) struct PyStreamFinalizer {
-    handle: std::cell::RefCell<Option<RuntimeHandle>>,
+    handle: Mutex<Option<RuntimeHandle>>,
     stream_id: u32,
 }
 
 impl PyStreamFinalizer {
     fn new(handle: RuntimeHandle, stream_id: u32) -> Self {
         Self {
-            handle: std::cell::RefCell::new(Some(handle)),
+            handle: Mutex::new(Some(handle)),
             stream_id,
         }
     }
@@ -967,7 +967,7 @@ impl PyStreamFinalizer {
 #[pymethods]
 impl PyStreamFinalizer {
     fn __call__(&self) {
-        let mut handle = self.handle.borrow_mut();
+        let mut handle = self.handle.lock().unwrap();
         if let Some(runtime_handle) = handle.take() {
             runtime_handle.cancel_py_stream_async(self.stream_id);
         }

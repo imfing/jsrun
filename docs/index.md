@@ -1,10 +1,10 @@
 # jsrun
 
-**Modern embedded JavaScript runtime for Python**
+**Modern JavaScript runtime for Python**
 
 jsrun is a Python library that embeds the [V8][v8] JavaScript engine, allowing you to run JavaScript code directly from Python.
 
-Whether you need to run user scripts, integrate JavaScript libraries, execute code for AI agents, or build extensible Python applications, `jsrun` provides a robust and secure solution.
+Whether you need to run user scripts, integrate JavaScript libraries, execute code for AI agents, or build extensible Python applications, `jsrun` provides a robust solution.
 
 ## Highlights
 

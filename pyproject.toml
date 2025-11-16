@@ -5,12 +5,33 @@ build-backend = "maturin"
 [project]
 name = "jsrun"
 requires-python = ">=3.10"
+description = "Modern embedded JavaScript runtime for Python powered by V8 and Rust."
+readme = "README.md"
+license = 'MIT'
+authors = [{ name = "Xin Fu", email = "xin@imfing.com" }]
+keywords = ["javascript", "v8", "pyo3", "asyncio", "rust-extension"]
 classifiers = [
-  "Programming Language :: Rust",
+  "Typing :: Typed",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
+  "Programming Language :: Rust",
+  'Operating System :: MacOS',
+  'Operating System :: POSIX :: Linux',
+  "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/imfing/jsrun"
+Repository = "https://github.com/imfing/jsrun"
 
 [dependency-groups]
 dev = ["maturin"]
