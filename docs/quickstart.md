@@ -11,6 +11,11 @@ source .venv/bin/activate
 pip install jsrun  # or `uv install jsrun`
 ```
 
+!!! warning "Platform Support"
+
+    Supports macOS (Apple Silicon) and Linux (x86_64, ARM64) with glibc ([manylinux](https://github.com/pypa/manylinux)). Windows and musl-based distributions (e.g., Alpine) are not supported currently.
+
+
 ## Run JavaScript from Python
 
 Use [`jsrun.eval`][jsrun.eval] to evaluate JavaScript code directly:
