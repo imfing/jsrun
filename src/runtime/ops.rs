@@ -279,9 +279,66 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
     let bridge_code = ascii_str!(
         r#"(function (globalThis) {
   const { ops } = Deno.core;
+  const { createTimer, cancelTimer } = Deno.core;
 
   // Delete Deno global after caching ops
   delete globalThis.Deno;
+
+  // Web-style timers backed by deno_core's native timer machinery.
+  // createTimer returns an opaque timer object; keep a registry so the
+  // public API hands out web-compatible numeric ids.
+  if (typeof globalThis.setTimeout !== "function") {
+    const toDelay = (delay) => {
+      const ms = Number(delay);
+      return Number.isFinite(ms) && ms > 0 ? ms : 0;
+    };
+    const toTask = (callback, args) => {
+      if (typeof callback !== "function") {
+        throw new TypeError("Timer callback must be a function");
+      }
+      return args.length === 0 ? callback : () => callback(...args);
+    };
+    let nextTimerId = 1;
+    const activeTimers = new Map();
+    const schedule = (callback, delay, args, repeat) => {
+      const task = toTask(callback, args);
+      const id = nextTimerId++;
+      const timer = createTimer(
+        repeat
+          ? task
+          : () => {
+              activeTimers.delete(id);
+              task();
+            },
+        toDelay(delay),
+        undefined,
+        repeat,
+        true,
+        false,
+      );
+      activeTimers.set(id, timer);
+      return id;
+    };
+    const cancel = (id) => {
+      const timer = activeTimers.get(Number(id));
+      if (timer !== undefined) {
+        activeTimers.delete(Number(id));
+        cancelTimer(timer);
+      }
+    };
+    globalThis.setTimeout = function setTimeout(callback, delay = 0, ...args) {
+      return schedule(callback, delay, args, false);
+    };
+    globalThis.setInterval = function setInterval(callback, delay = 0, ...args) {
+      return schedule(callback, delay, args, true);
+    };
+    globalThis.clearTimeout = function clearTimeout(id) {
+      cancel(id);
+    };
+    globalThis.clearInterval = function clearInterval(id) {
+      cancel(id);
+    };
+  }
 
   function prepare(value) {
     if (value === undefined || value === null) {

@@ -122,6 +122,35 @@ asyncio.run(main())
 !!! tip "Prefer `eval_async()` in async contexts"
     If you're already in an async Python function, use [`eval_async()`][jsrun.Runtime.eval_async]. It won't block your event loop and handles Promises naturally.
 
+### Timers
+
+The standard web timer functions — `setTimeout`, `clearTimeout`, `setInterval`, and `clearInterval` — are available globally, backed by the runtime's native timer machinery:
+
+```python
+import asyncio
+from jsrun import Runtime
+
+async def main():
+    with Runtime() as runtime:
+        result = await runtime.eval_async("""
+            new Promise((resolve) => setTimeout(() => resolve('done'), 100))
+        """)
+        print(result)  # done
+
+asyncio.run(main())
+```
+
+Timers scheduled during a synchronous `eval()` also fire in the background between evaluations, since the runtime thread keeps driving the event loop:
+
+```python
+with Runtime() as runtime:
+    runtime.eval("setTimeout(() => { globalThis.ready = true; }, 100)")
+    time.sleep(0.2)
+    print(runtime.eval("globalThis.ready"))  # True
+```
+
+Timer callbacks must be functions; string callbacks (implicit `eval`) are not supported and raise a `TypeError`.
+
 
 ## Resource Limits
 
