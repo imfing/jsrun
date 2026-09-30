@@ -67,6 +67,34 @@ for artifact in "${STATIC_LIB}" "${SRC_BINDING}"; do
   fi
 done
 
+# Guard against glibc drift: the archive must stay linkable under
+# manylinux_2_28 (glibc 2.28). Fail loudly if the static lib references
+# symbols introduced in later glibc versions (the denylist covers known
+# offenders from glibc 2.29-2.38; extend it if auditwheel ever complains).
+GLIBC_POST_228_SYMBOLS='^(pthread_cond_clockwait|pthread_mutex_clocklock|pthread_rwlock_clockrdlock|pthread_rwlock_clockwrlock|sem_clockwait|pthread_clockjoin_np|gettid|getdents64|__libc_single_threaded|arc4random|arc4random_buf|arc4random_uniform|close_range|__isoc23_.*)$'
+UNDEFINED_SYMBOLS=""
+for nm_bin in llvm-nm "${TARGET_ARCH}-nm" nm; do
+  if command -v "${nm_bin}" >/dev/null 2>&1; then
+    if UNDEFINED_SYMBOLS=$("${nm_bin}" --undefined-only "${STATIC_LIB}" 2>/dev/null) && [ -n "${UNDEFINED_SYMBOLS}" ]; then
+      echo "Symbol audit using ${nm_bin}"
+      break
+    fi
+    UNDEFINED_SYMBOLS=""
+  fi
+done
+if [ -z "${UNDEFINED_SYMBOLS}" ]; then
+  echo "ERROR: no nm tool in the image could read ${STATIC_LIB}; refusing to publish unaudited archive" >&2
+  exit 1
+fi
+BAD_SYMBOLS=$(echo "${UNDEFINED_SYMBOLS}" | awk '{print $NF}' | sort -u | grep -E "${GLIBC_POST_228_SYMBOLS}" || true)
+if [ -n "${BAD_SYMBOLS}" ]; then
+  echo "ERROR: static lib references symbols newer than glibc 2.28:" >&2
+  echo "${BAD_SYMBOLS}" >&2
+  echo "The build is not manylinux_2_28 compatible; check the sysroot setup in the builder image." >&2
+  exit 1
+fi
+echo "glibc 2.28 symbol audit passed"
+
 mkdir -p "${OUTPUT_DIR}"
 gzip -9c "${STATIC_LIB}" > "${OUTPUT_DIR}/librusty_v8_release_${TARGET_ARCH}.a.gz"
 cp "${SRC_BINDING}" "${OUTPUT_DIR}/src_binding_release_${TARGET_ARCH}.rs"

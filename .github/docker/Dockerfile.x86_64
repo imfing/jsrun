@@ -1,5 +1,13 @@
 # x86_64 manylinux builder for jsrun Python wheels
 
+# Donor stage for a glibc 2.28 sysroot (AlmaLinux 8 based). The rust-cross
+# base image used to ship its own crosstool-ng toolchain + 2.28 sysroot at
+# /usr/x86_64-unknown-linux-gnu, but a mid-2026 rebuild of the mutable tag
+# left that directory empty, so V8 would otherwise compile against the
+# Ubuntu host glibc (2.35) and reference symbols newer than manylinux_2_28
+# allows (e.g. pthread_cond_clockwait, glibc 2.30).
+FROM quay.io/pypa/manylinux_2_28_x86_64 AS sysroot
+
 FROM ghcr.io/rust-cross/manylinux_2_28-cross:x86_64
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -30,15 +38,24 @@ ENV CXX=clang-19
 ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
 ENV PATH=/usr/lib/llvm-19/bin:${PATH}
 
+# glibc 2.28 sysroot donated from the official manylinux image, so V8 is
+# compiled against 2.28 headers. V8 gates newer glibc APIs behind
+# compile-time glibc version checks, so old headers keep the archive
+# manylinux_2_28 compatible.
+COPY --from=sysroot /usr/include /opt/manylinux_2_28_sysroot/usr/include
+COPY --from=sysroot /usr/lib64 /opt/manylinux_2_28_sysroot/usr/lib64
+RUN ln -s usr/lib64 /opt/manylinux_2_28_sysroot/lib64
+ENV TARGET_SYSROOT=/opt/manylinux_2_28_sysroot
+
 # For x86_64 native build: configure bindgen to find both V8's custom libc++ and system headers
 # Relative paths (third_party/*) are resolved from V8 source during build
-# System paths provide standard C library headers (stdint.h, etc.)
+# The sysroot provides standard C library headers (stdint.h, etc.) at glibc 2.28
 ENV BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_gnu="\
+--sysroot=/opt/manylinux_2_28_sysroot \
 -Ithird_party/libc++/src/include \
 -Ithird_party/libc++abi/src/include \
 -Ibuildtools/third_party/libc++ \
--isystem/usr/include \
--isystem/usr/include/x86_64-linux-gnu"
+-isystem/opt/manylinux_2_28_sysroot/usr/include"
 
 # Install Rust
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -60,7 +77,7 @@ ENV V8_FROM_SOURCE=1
 # use_lld=true: Use LLD linker
 # treat_warnings_as_errors=false: Don't fail on warnings
 # use_glib=false: Don't depend on glib
-ENV GN_ARGS="use_custom_libcxx=true clang_use_chrome_plugins=false is_clang=true use_lld=true treat_warnings_as_errors=false use_glib=false v8_monolithic=true v8_monolithic_for_shared_library=true"
+ENV GN_ARGS="use_custom_libcxx=true clang_use_chrome_plugins=false is_clang=true use_lld=true treat_warnings_as_errors=false use_glib=false v8_monolithic=true v8_monolithic_for_shared_library=true target_sysroot=\"/opt/manylinux_2_28_sysroot\""
 
 WORKDIR /workdir
 
