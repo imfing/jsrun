@@ -165,7 +165,7 @@ fn op_jsrun_call_python_sync(
 /// Returns a future that polls the Python coroutine using the asyncio event loop
 /// from the TaskLocals stored in OpState. This enables Python async functions to
 /// be awaited from JavaScript.
-#[op2(async)]
+#[op2]
 #[serde]
 fn op_jsrun_call_python_async(
     state: &mut OpState,
@@ -236,7 +236,7 @@ fn op_jsrun_call_python_async(
     })
 }
 
-#[op2(async)]
+#[op2]
 #[serde]
 fn op_jsrun_stream_pull_py(
     state: &mut OpState,
@@ -256,7 +256,7 @@ fn op_jsrun_stream_pull_py(
     })
 }
 
-#[op2(async)]
+#[op2]
 fn op_jsrun_stream_cancel_py(
     state: &mut OpState,
     #[smi] stream_id: u32,

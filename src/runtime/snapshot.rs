@@ -22,13 +22,29 @@ impl Default for SnapshotBuilderConfig {
 
 pub struct SnapshotBuilder {
     runtime: Option<JsRuntimeForSnapshot>,
+    // Kept alive alongside the isolate: deno_core captures a tokio handle at
+    // isolate creation to honor delayed V8 foreground tasks (e.g. GC tasks)
+    // and aborts the process when one is posted without a handle.
+    _tokio_rt: tokio::runtime::Runtime,
 }
 
 impl SnapshotBuilder {
     pub fn new(config: SnapshotBuilderConfig) -> RuntimeResult<Self> {
-        let mut runtime = create_runtime().map_err(|err| {
-            RuntimeError::internal(format!("Failed to initialize snapshot runtime: {err}"))
-        })?;
+        let tokio_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| {
+                RuntimeError::internal(format!(
+                    "Failed to build tokio runtime for snapshot builder: {err}"
+                ))
+            })?;
+
+        let mut runtime = {
+            let _tokio_guard = tokio_rt.enter();
+            create_runtime().map_err(|err| {
+                RuntimeError::internal(format!("Failed to initialize snapshot runtime: {err}"))
+            })?
+        };
 
         if config.enable_console == Some(false) {
             disable_console(&mut runtime)?;
@@ -40,6 +56,7 @@ impl SnapshotBuilder {
 
         Ok(Self {
             runtime: Some(runtime),
+            _tokio_rt: tokio_rt,
         })
     }
 

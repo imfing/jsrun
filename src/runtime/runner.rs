@@ -437,7 +437,6 @@ impl RuntimeDispatcher {
             let mut cx = std::task::Context::from_waker(&noop_waker);
             let poll_opts = PollEventLoopOptions {
                 wait_for_inspector: false,
-                pump_v8_message_loop: true,
             };
 
             // Check for event loop errors
@@ -1851,7 +1850,15 @@ pub fn spawn_runtime_thread(config: RuntimeConfig) -> RuntimeResult<SpawnRuntime
                 .build()
                 .expect("failed to build tokio runtime");
 
-            let core = match RuntimeCoreState::new(config) {
+            // The isolate must be created inside a tokio runtime context:
+            // deno_core captures the tokio handle at creation time to honor
+            // delayed V8 foreground tasks (e.g. GC memory reducer tasks) and
+            // aborts the process when one is posted without a handle.
+            let core_result = {
+                let _tokio_guard = tokio_rt.enter();
+                RuntimeCoreState::new(config)
+            };
+            let core = match core_result {
                 Ok(core) => {
                     let termination = core.termination_controller();
                     let inspector_info =

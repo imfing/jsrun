@@ -1,0 +1,83 @@
+name: Build V8 archive
+
+# Builds rusty_v8 from source inside the manylinux_2_28 containers and
+# publishes the static library + src binding as GitHub release assets.
+# The wheel CI consumes these via RUSTY_V8_ARCHIVE/RUSTY_V8_SRC_BINDING_PATH,
+# so V8 only needs to be compiled when the v8 crate version in Cargo.lock
+# changes (run this workflow manually after such a bump).
+#
+# Why from source: denoland's prebuilt archives require glibc >= 2.30
+# (e.g. pthread_cond_clockwait), but manylinux_2_28 wheels must link
+# against glibc 2.28.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # Required for uploading release assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - name: x86_64
+            target: x86_64-unknown-linux-gnu
+            dockerfile: Dockerfile.x86_64
+          - name: aarch64
+            target: aarch64-unknown-linux-gnu
+            dockerfile: Dockerfile.aarch64
+    steps:
+      - uses: actions/checkout@v5
+
+      # V8 needs ~25GB; free runners start with ~14GB available.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af
+          df -h /
+
+      - name: Read v8 version from Cargo.lock
+        id: v8
+        run: |
+          VERSION=$(sed -n '/^name = "v8"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to determine v8 crate version from Cargo.lock"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building archive for rusty_v8 v$VERSION"
+
+      - name: Build builder image
+        run: |
+          docker build \
+            -t jsrun-v8-builder:${{ matrix.arch.name }} \
+            -f .github/docker/${{ matrix.arch.dockerfile }} \
+            .github/docker/
+
+      - name: Build V8 from source
+        run: |
+          mkdir -p dist-v8
+          docker run --rm \
+            -v "$(pwd):/workdir" \
+            -w /workdir \
+            jsrun-v8-builder:${{ matrix.arch.name }} \
+            bash .github/scripts/build-v8-archive.sh ${{ matrix.arch.target }} dist-v8
+
+      - name: Upload artifacts to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="librusty_v8-v${{ steps.v8.outputs.version }}"
+          # Prerelease so archive tags never show up as the "latest" jsrun release.
+          # The tag deliberately does not match the v* pattern that triggers CI.
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" \
+              --prerelease \
+              --title "librusty_v8 v${{ steps.v8.outputs.version }} (manylinux_2_28)" \
+              --notes "Prebuilt rusty_v8 static libraries compiled inside manylinux_2_28 containers (glibc 2.28 compatible). Consumed by the wheel CI via RUSTY_V8_ARCHIVE." \
+            || true
+          gh release upload "$TAG" dist-v8/* --clobber
