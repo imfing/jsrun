@@ -26,6 +26,19 @@ echo "=== Building rusty_v8 v${V8_VERSION} from source for ${TARGET_ARCH} ==="
 rustc --version
 cargo --version
 
+# The rust-cross base images configure CARGO_TARGET_*_LINKER env vars, but
+# the mutable image tags drift and the referenced cross-gcc may no longer
+# exist (observed with x86_64-unknown-linux-gnu-gcc). Only host build
+# scripts are linked here (-p v8 produces an rlib), so fall back to the
+# clang installed by our Dockerfiles when a configured linker is missing.
+for var in $(env | sed -n 's/^\(CARGO_TARGET_[A-Z0-9_]*_LINKER\)=.*/\1/p'); do
+  linker="${!var}"
+  if ! command -v "${linker}" >/dev/null 2>&1; then
+    echo "Configured ${var}=${linker} not found in image; using clang-19 instead"
+    export "${var}=clang-19"
+  fi
+done
+
 # The crates.io package is missing files required for from-source builds,
 # so patch v8 to the matching git tag.
 if ! grep -q "\[patch.crates-io\]" Cargo.toml; then
