@@ -9,7 +9,10 @@ use deno_core::futures::channel::oneshot;
 use deno_core::futures::future;
 use deno_core::futures::prelude::*;
 use deno_core::unsync::spawn;
-use deno_core::{InspectorMsg, InspectorSessionKind, InspectorSessionProxy, JsRuntimeInspector};
+use deno_core::{
+    InspectorMsg, InspectorSessionChannels, InspectorSessionKind, InspectorSessionProxy,
+    JsRuntimeInspector,
+};
 use fastwebsockets::upgrade::upgrade;
 use fastwebsockets::{Frame, OpCode, WebSocket};
 use hyper::body::Bytes;
@@ -208,8 +211,10 @@ fn handle_ws_request(
         let (inbound_tx, inbound_rx) = mpsc::unbounded();
 
         let proxy = InspectorSessionProxy {
-            tx: outbound_tx,
-            rx: inbound_rx,
+            channels: InspectorSessionChannels::Regular {
+                tx: outbound_tx,
+                rx: inbound_rx,
+            },
             kind: InspectorSessionKind::NonBlocking {
                 wait_for_disconnect: true,
             },
