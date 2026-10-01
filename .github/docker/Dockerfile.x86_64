@@ -44,6 +44,9 @@ ENV PATH=/usr/lib/llvm-19/bin:${PATH}
 # manylinux_2_28 compatible.
 COPY --from=sysroot /usr/include /opt/manylinux_2_28_sysroot/usr/include
 COPY --from=sysroot /usr/lib64 /opt/manylinux_2_28_sysroot/usr/lib64
+# GCC installation dir: provides crtbeginS.o/crtendS.o, libgcc.a and the
+# libgcc_s.so devel symlink needed when linking host tool executables.
+COPY --from=sysroot /usr/lib/gcc /opt/manylinux_2_28_sysroot/usr/lib/gcc
 RUN ln -s usr/lib64 /opt/manylinux_2_28_sysroot/lib64
 ENV TARGET_SYSROOT=/opt/manylinux_2_28_sysroot
 
