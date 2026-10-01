@@ -12,6 +12,15 @@ name: Build V8 archive
 
 on:
   workflow_dispatch:
+    inputs:
+      arch:
+        description: "Architecture(s) to build"
+        type: choice
+        default: all
+        options:
+          - all
+          - x86_64
+          - aarch64
 
 permissions:
   contents: write # Required for uploading release assets
@@ -23,13 +32,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - name: x86_64
-            target: x86_64-unknown-linux-gnu
-            dockerfile: Dockerfile.x86_64
-          - name: aarch64
-            target: aarch64-unknown-linux-gnu
-            dockerfile: Dockerfile.aarch64
+        arch: ${{ fromJSON(
+          inputs.arch == 'x86_64' && '[{"name":"x86_64","target":"x86_64-unknown-linux-gnu","dockerfile":"Dockerfile.x86_64"}]'
+          || inputs.arch == 'aarch64' && '[{"name":"aarch64","target":"aarch64-unknown-linux-gnu","dockerfile":"Dockerfile.aarch64"}]'
+          || '[{"name":"x86_64","target":"x86_64-unknown-linux-gnu","dockerfile":"Dockerfile.x86_64"},{"name":"aarch64","target":"aarch64-unknown-linux-gnu","dockerfile":"Dockerfile.aarch64"}]') }}
     steps:
       - uses: actions/checkout@v5
 
