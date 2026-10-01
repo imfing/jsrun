@@ -77,7 +77,7 @@ ENV V8_FROM_SOURCE=1
 # use_lld=true: Use LLD linker
 # treat_warnings_as_errors=false: Don't fail on warnings
 # use_glib=false: Don't depend on glib
-ENV GN_ARGS="use_custom_libcxx=true clang_use_chrome_plugins=false is_clang=true use_lld=true treat_warnings_as_errors=false use_glib=false v8_monolithic=true v8_monolithic_for_shared_library=true target_sysroot=\"/opt/manylinux_2_28_sysroot\""
+ENV GN_ARGS="use_custom_libcxx=true clang_use_chrome_plugins=false is_clang=true use_lld=true treat_warnings_as_errors=false use_glib=false v8_monolithic=true v8_monolithic_for_shared_library=true target_sysroot=\"/opt/manylinux_2_28_sysroot\" sysroot=\"/opt/manylinux_2_28_sysroot\""
 
 WORKDIR /workdir
 

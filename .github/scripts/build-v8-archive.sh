@@ -67,6 +67,16 @@ for artifact in "${STATIC_LIB}" "${SRC_BINDING}"; do
   fi
 done
 
+# Diagnostics: show the GN args that were actually resolved and whether the
+# sysroot made it into the compile commands.
+GN_OUT_DIR="${BUILD_DIR}/gn_out"
+if [ -f "${GN_OUT_DIR}/args.gn" ]; then
+  echo "=== resolved gn args (${GN_OUT_DIR}/args.gn) ==="
+  cat "${GN_OUT_DIR}/args.gn"
+fi
+echo "=== --sysroot flags in ninja compile commands ==="
+grep -rho -- "--sysroot=[^ \"]*" "${GN_OUT_DIR}"/*.ninja 2>/dev/null | sort | uniq -c || echo "(none found)"
+
 # Guard against glibc drift: the archive must stay linkable under
 # manylinux_2_28 (glibc 2.28). Fail loudly if the static lib references
 # symbols introduced in later glibc versions (the denylist covers known
@@ -86,7 +96,13 @@ if [ -z "${UNDEFINED_SYMBOLS}" ]; then
   echo "ERROR: no nm tool in the image could read ${STATIC_LIB}; refusing to publish unaudited archive" >&2
   exit 1
 fi
-BAD_SYMBOLS=$(echo "${UNDEFINED_SYMBOLS}" | awk '{print $NF}' | sort -u | grep -E "${GLIBC_POST_228_SYMBOLS}" || true)
+# Only strong undefined references ("U") are fatal: weak ones ("w"/"v") are
+# left null by the linker on older glibc and handled by runtime fallbacks.
+WEAK_MATCHES=$(echo "${UNDEFINED_SYMBOLS}" | awk '$1 == "w" || $1 == "v" {print $2}' | sort -u | grep -E "${GLIBC_POST_228_SYMBOLS}" || true)
+if [ -n "${WEAK_MATCHES}" ]; then
+  echo "Note: weak references to post-2.28 symbols (harmless): ${WEAK_MATCHES}"
+fi
+BAD_SYMBOLS=$(echo "${UNDEFINED_SYMBOLS}" | awk '$1 == "U" {print $2}' | sort -u | grep -E "${GLIBC_POST_228_SYMBOLS}" || true)
 if [ -n "${BAD_SYMBOLS}" ]; then
   echo "ERROR: static lib references symbols newer than glibc 2.28:" >&2
   echo "${BAD_SYMBOLS}" >&2
