@@ -112,6 +112,41 @@ jobs:
           name: wheels-linux-${{ matrix.platform.arch }}
           path: dist
 
+  # Build musllinux wheels (Alpine and other musl distros). Unlike the gnu
+  # builds, denoland ships musl prebuilts (since rusty_v8 v150.2.0) with no
+  # glibc-versioning concerns, so rusty_v8's build script downloads them
+  # automatically - no self-hosted archive involved.
+  linux-musl:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          # Python extension modules must link musl libc dynamically; Rust's
+          # musl targets default to a static crt.
+          RUSTFLAGS: -C target-feature=-crt-static
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: musllinux_1_2
+          args: --release --out dist
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Upload wheels
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheels-musllinux-${{ matrix.platform.arch }}
+          path: dist
+
   # Test built manylinux wheels against all supported Python versions.
   # A single cp310-abi3 wheel per architecture covers 3.10+.
   test-wheels-x86_64:
@@ -166,9 +201,39 @@ jobs:
           pip install pytest pytest-asyncio
           pytest tests/ -v
 
+  # Test musllinux wheels inside Alpine containers (run via docker rather
+  # than `container:` because node-based actions cannot execute on musl).
+  test-wheels-musl:
+    needs: linux-musl
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download wheels
+        uses: actions/download-artifact@v6
+        with:
+          name: wheels-musllinux-${{ matrix.platform.arch }}
+          path: dist
+      - name: Test wheel in Alpine container
+        run: |
+          WHEEL=$(ls dist/*cp310-abi3*musllinux*${{ matrix.platform.arch }}.whl | head -n 1)
+          echo "Testing wheel: $WHEEL"
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            python:${{ matrix.python-version }}-alpine \
+            sh -c "pip install --upgrade pip && pip install $WHEEL pytest pytest-asyncio && pytest tests/ -q"
+
   # Create GitHub Release with all artifacts
   release:
-    needs: [macos, sdist, linux, test-wheels-x86_64, test-wheels-aarch64]
+    needs: [macos, sdist, linux, linux-musl, test-wheels-x86_64, test-wheels-aarch64, test-wheels-musl]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:

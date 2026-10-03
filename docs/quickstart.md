@@ -13,7 +13,7 @@ pip install jsrun  # or `uv install jsrun`
 
 !!! warning "Platform Support"
 
-    Supports macOS (Apple Silicon) and Linux (x86_64, ARM64) with glibc ([manylinux](https://github.com/pypa/manylinux)). Windows and musl-based distributions (e.g., Alpine) are not supported currently.
+    Supports macOS (Apple Silicon) and Linux (x86_64, ARM64) with glibc ([manylinux](https://github.com/pypa/manylinux)) or musl ([musllinux](https://github.com/pypa/manylinux), e.g. Alpine). Windows is not supported currently.
 
 
 ## Run JavaScript from Python
