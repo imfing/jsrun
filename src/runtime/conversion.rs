@@ -8,14 +8,15 @@ use pyo3::conversion::IntoPyObject;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyBool, PyByteArray, PyBytes, PyDateTime, PyDict, PyFloat, PyFrozenSet, PyFrozenSetMethods,
-    PyInt, PyList, PyMemoryView, PySet, PySetMethods, PyString,
+    PyBool, PyByteArray, PyBytes, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyFrozenSet,
+    PyFrozenSetMethods, PyInt, PyList, PyMemoryView, PySet, PySetMethods, PyString, PyTime,
 };
 use std::collections::HashSet;
 
 const TYPE_TAG: &str = "__jsrun_type";
 const UNDEFINED_TYPE: &str = "Undefined";
 const DATE_TYPE: &str = "Date";
+const TEMPORAL_TYPE: &str = "Temporal";
 const DATE_EPOCH_KEY: &str = "epoch_ms";
 const SET_TYPE: &str = "Set";
 const SET_VALUES_KEY: &str = "values";
@@ -27,6 +28,178 @@ const BIGINT_VALUE_KEY: &str = "value";
 /// This is the new primary conversion function that supports native JavaScript values
 /// including NaN and ±Infinity without sentinel strings.
 ///
+/// Build a tagged Temporal payload, materialized as a real Temporal instance
+/// on the JavaScript side by the bridge helpers.
+fn temporal_tagged<const N: usize>(kind: &str, fields: [(&str, JSValue); N]) -> JSValue {
+    let mut map = IndexMap::new();
+    map.insert(TYPE_TAG.to_string(), JSValue::String(TEMPORAL_TYPE.into()));
+    map.insert("kind".to_string(), JSValue::String(kind.into()));
+    for (key, value) in fields {
+        map.insert(key.to_string(), value);
+    }
+    JSValue::Object(map)
+}
+
+fn temporal_field_i64(map: &IndexMap<String, JSValue>, key: &str) -> PyResult<i64> {
+    match map.get(key) {
+        Some(JSValue::Int(v)) => Ok(*v),
+        Some(JSValue::Float(f)) if f.is_finite() && f.fract() == 0.0 => Ok(*f as i64),
+        _ => Err(PyRuntimeError::new_err(format!(
+            "Invalid Temporal payload: missing or non-integer '{key}'"
+        ))),
+    }
+}
+
+fn temporal_field_i128(map: &IndexMap<String, JSValue>, key: &str) -> PyResult<i128> {
+    let text = match map.get(key) {
+        Some(JSValue::String(s)) => s.clone(),
+        Some(JSValue::Int(v)) => return Ok(*v as i128),
+        Some(JSValue::BigInt(b)) => b.to_string(),
+        _ => {
+            return Err(PyRuntimeError::new_err(format!(
+                "Invalid Temporal payload: missing '{key}'"
+            )))
+        }
+    };
+    text.parse::<i128>().map_err(|_| {
+        PyRuntimeError::new_err(format!("Invalid Temporal payload: non-integer '{key}'"))
+    })
+}
+
+fn temporal_field_str<'a>(map: &'a IndexMap<String, JSValue>, key: &str) -> PyResult<&'a str> {
+    match map.get(key) {
+        Some(JSValue::String(s)) => Ok(s),
+        _ => Err(PyRuntimeError::new_err(format!(
+            "Invalid Temporal payload: missing '{key}'"
+        ))),
+    }
+}
+
+/// Resolve a Temporal time zone identifier to a Python tzinfo: "UTC",
+/// fixed offsets like "+05:30", or IANA names via zoneinfo.
+fn resolve_timezone<'py>(py: Python<'py>, tz: &str) -> PyResult<pyo3::Bound<'py, PyAny>> {
+    let datetime_mod = py.import("datetime")?;
+    let timezone_cls = datetime_mod.getattr("timezone")?;
+    if tz.eq_ignore_ascii_case("UTC") {
+        return timezone_cls.getattr("utc");
+    }
+    if let Some(rest) = tz.strip_prefix('+').or_else(|| tz.strip_prefix('-')) {
+        let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
+        let mut parts = rest.split(':');
+        let parse = |p: Option<&str>| -> PyResult<i64> {
+            match p {
+                None => Ok(0),
+                Some(s) => s.parse::<i64>().map_err(|_| {
+                    PyRuntimeError::new_err(format!("Invalid time zone offset '{tz}'"))
+                }),
+            }
+        };
+        let hours = parse(parts.next())?;
+        let minutes = parse(parts.next())?;
+        let seconds = parse(parts.next())?;
+        let offset = sign * (hours * 3600 + minutes * 60 + seconds);
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("seconds", offset)?;
+        let delta = datetime_mod.getattr("timedelta")?.call((), Some(&kwargs))?;
+        return timezone_cls.call1((delta,));
+    }
+    let zoneinfo_cls = py.import("zoneinfo")?.getattr("ZoneInfo")?;
+    zoneinfo_cls.call1((tz,)).map_err(|err| {
+        PyRuntimeError::new_err(format!(
+            "Unknown time zone '{tz}' from Temporal value: {err}"
+        ))
+    })
+}
+
+/// Build an aware datetime from epoch nanoseconds (sub-microsecond precision
+/// is truncated), optionally converted into the given time zone.
+fn epoch_ns_to_datetime(py: Python<'_>, epoch_ns: i128, tz: Option<&str>) -> PyResult<Py<PyAny>> {
+    let datetime_mod = py.import("datetime")?;
+    let secs: i64 = epoch_ns
+        .div_euclid(1_000_000_000)
+        .try_into()
+        .map_err(|_| PyRuntimeError::new_err("Temporal value out of range for Python datetime"))?;
+    let micros = (epoch_ns.rem_euclid(1_000_000_000) / 1000) as i64;
+    let utc = datetime_mod.getattr("timezone")?.getattr("utc")?;
+    let dt = datetime_mod
+        .getattr("datetime")?
+        .call_method1("fromtimestamp", (secs, utc))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("microseconds", micros)?;
+    let delta = datetime_mod.getattr("timedelta")?.call((), Some(&kwargs))?;
+    let mut dt = dt.add(delta)?;
+    if let Some(tz) = tz {
+        let tzinfo = resolve_timezone(py, tz)?;
+        dt = dt.call_method1("astimezone", (tzinfo,))?;
+    }
+    Ok(dt.unbind())
+}
+
+/// Convert a tagged Temporal payload into the matching Python type.
+/// Returns Ok(None) for unknown kinds so the generic dict fallback applies.
+fn temporal_to_python(
+    py: Python<'_>,
+    map: &IndexMap<String, JSValue>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let kind = match map.get("kind") {
+        Some(JSValue::String(kind)) => kind.as_str(),
+        _ => return Ok(None),
+    };
+    let datetime_mod = py.import("datetime")?;
+    let converted = match kind {
+        "Instant" => epoch_ns_to_datetime(py, temporal_field_i128(map, "epoch_ns")?, None)?,
+        "ZonedDateTime" => epoch_ns_to_datetime(
+            py,
+            temporal_field_i128(map, "epoch_ns")?,
+            Some(temporal_field_str(map, "time_zone")?),
+        )?,
+        "PlainDate" => datetime_mod
+            .getattr("date")?
+            .call1((
+                temporal_field_i64(map, "year")?,
+                temporal_field_i64(map, "month")?,
+                temporal_field_i64(map, "day")?,
+            ))?
+            .unbind(),
+        "PlainTime" => datetime_mod
+            .getattr("time")?
+            .call1((
+                temporal_field_i64(map, "hour")?,
+                temporal_field_i64(map, "minute")?,
+                temporal_field_i64(map, "second")?,
+                temporal_field_i64(map, "nanosecond")? / 1000,
+            ))?
+            .unbind(),
+        "PlainDateTime" => datetime_mod
+            .getattr("datetime")?
+            .call1((
+                temporal_field_i64(map, "year")?,
+                temporal_field_i64(map, "month")?,
+                temporal_field_i64(map, "day")?,
+                temporal_field_i64(map, "hour")?,
+                temporal_field_i64(map, "minute")?,
+                temporal_field_i64(map, "second")?,
+                temporal_field_i64(map, "nanosecond")? / 1000,
+            ))?
+            .unbind(),
+        "Duration" => {
+            let micros: i64 = (temporal_field_i128(map, "ns")? / 1000)
+                .try_into()
+                .map_err(|_| {
+                    PyRuntimeError::new_err("Temporal.Duration out of range for Python timedelta")
+                })?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("microseconds", micros)?;
+            datetime_mod
+                .getattr("timedelta")?
+                .call((), Some(&kwargs))?
+                .unbind()
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(converted))
+}
+
 /// For Function variants, a RuntimeHandle must be provided to create JsFunction proxies.
 pub(crate) fn js_value_to_python(
     py: Python<'_>,
@@ -104,6 +277,11 @@ pub(crate) fn js_value_to_python(
                                 })?;
                             let obj = value.into_pyobject(py)?;
                             return Ok(obj.into_any().unbind());
+                        }
+                    }
+                    TEMPORAL_TYPE => {
+                        if let Some(converted) = temporal_to_python(py, map)? {
+                            return Ok(converted);
                         }
                     }
                     _ => {}
@@ -334,6 +512,47 @@ fn python_to_js_value_internal(
             ));
         }
         Ok(JSValue::Date(epoch_ms.round() as i64))
+    } else if let Ok(py_date) = obj.cast::<PyDate>() {
+        // Pure date (datetime is matched above); becomes Temporal.PlainDate.
+        add_bytes(16, tracker)?;
+        let field = |name: &str| -> PyResult<i64> { py_date.getattr(name)?.extract::<i64>() };
+        Ok(temporal_tagged(
+            "PlainDate",
+            [
+                ("year", JSValue::Int(field("year")?)),
+                ("month", JSValue::Int(field("month")?)),
+                ("day", JSValue::Int(field("day")?)),
+            ],
+        ))
+    } else if let Ok(py_time) = obj.cast::<PyTime>() {
+        // Becomes Temporal.PlainTime; aware times have no Temporal analogue.
+        if !py_time.getattr("tzinfo")?.is_none() {
+            return Err(PyRuntimeError::new_err(
+                "datetime.time with tzinfo is not supported; use a full datetime instead",
+            ));
+        }
+        add_bytes(16, tracker)?;
+        let field = |name: &str| -> PyResult<i64> { py_time.getattr(name)?.extract::<i64>() };
+        Ok(temporal_tagged(
+            "PlainTime",
+            [
+                ("hour", JSValue::Int(field("hour")?)),
+                ("minute", JSValue::Int(field("minute")?)),
+                ("second", JSValue::Int(field("second")?)),
+                ("nanosecond", JSValue::Int(field("microsecond")? * 1000)),
+            ],
+        ))
+    } else if let Ok(py_delta) = obj.cast::<PyDelta>() {
+        // Becomes Temporal.Duration (exact: timedelta is microsecond-based).
+        add_bytes(24, tracker)?;
+        let field = |name: &str| -> PyResult<i128> { py_delta.getattr(name)?.extract::<i128>() };
+        let total_ns = ((field("days")? * 86_400 + field("seconds")?) * 1_000_000
+            + field("microseconds")?)
+            * 1000;
+        Ok(temporal_tagged(
+            "Duration",
+            [("ns", JSValue::String(total_ns.to_string()))],
+        ))
     } else if let Ok(b) = obj.extract::<bool>() {
         add_bytes(1, tracker)?;
         Ok(JSValue::Bool(b))

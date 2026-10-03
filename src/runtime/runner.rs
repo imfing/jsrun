@@ -2223,6 +2223,29 @@ impl RuntimeCoreState {
         value.instance_of(scope, ctor.into()).unwrap_or_default()
     }
 
+    /// Convert a Temporal instance into a tagged plain object via the bridge
+    /// helper. Returns None for non-Temporal values (including when the
+    /// helper is unavailable), letting generic conversion proceed.
+    fn temporal_prepare<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        value: v8::Local<'s, v8::Value>,
+    ) -> Option<v8::Local<'s, v8::Value>> {
+        if !value.is_object() || value.is_function() {
+            return None;
+        }
+        let context = scope.get_current_context();
+        let global = context.global(scope);
+        let key = v8::String::new(scope, "__jsrun_temporal_prepare")?;
+        let helper_value = global.get(scope, key.into())?;
+        let helper = v8::Local::<v8::Function>::try_from(helper_value).ok()?;
+        let result = helper.call(scope, global.into(), &[value])?;
+        if result.is_object() {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
     fn store_pending_call(
         &self,
         promise: v8::Global<v8::Promise>,
@@ -2906,6 +2929,27 @@ impl RuntimeCoreState {
                         RuntimeError::internal(format!("Failed to set property '{key}'"))
                     })?;
                 }
+                // Tagged Temporal payloads (from Python date/time/timedelta)
+                // are upgraded to real Temporal instances by the bridge helper.
+                if matches!(map.get("__jsrun_type"), Some(JSValue::String(tag)) if tag == "Temporal")
+                {
+                    let context = scope.get_current_context();
+                    let global = context.global(scope);
+                    let helper_key = v8::String::new(scope, "__jsrun_temporal_revive")
+                        .ok_or_else(|| RuntimeError::internal("Failed to allocate helper key"))?;
+                    let helper_value = global.get(scope, helper_key.into()).ok_or_else(|| {
+                        RuntimeError::internal("Missing __jsrun_temporal_revive helper")
+                    })?;
+                    let helper_fn =
+                        v8::Local::<v8::Function>::try_from(helper_value).map_err(|_| {
+                            RuntimeError::internal("__jsrun_temporal_revive is not callable")
+                        })?;
+                    return helper_fn
+                        .call(scope, global.into(), &[object.into()])
+                        .ok_or_else(|| {
+                            RuntimeError::internal("__jsrun_temporal_revive invocation failed")
+                        });
+                }
                 Ok(object.into())
             }
             JSValue::Date(epoch_ms) => {
@@ -3151,6 +3195,19 @@ impl RuntimeCoreState {
             }
             tracker.add_bytes(16)?;
             Ok(JSValue::Date(epoch_ms.round() as i64))
+        } else if let Some(prepared) = Self::temporal_prepare(scope, value) {
+            // Temporal instance converted by the bridge helper into a tagged
+            // plain object; recurse to serialize its fields.
+            Self::value_to_js_value_internal(
+                fn_registry,
+                next_fn_id,
+                scope,
+                prepared,
+                seen,
+                tracker,
+                None,
+                stream_registry,
+            )
         } else if value.is_object() && Self::is_readable_stream(scope, value) {
             let stream_id = stream_registry.register_stream(scope, value);
             tracker.add_bytes(size_of::<u32>())?;
