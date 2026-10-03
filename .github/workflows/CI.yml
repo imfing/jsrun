@@ -33,7 +33,7 @@ jobs:
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-macos-${{ matrix.platform.target }}
           path: dist
@@ -41,14 +41,14 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist
       - name: Upload sdist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist
           path: dist
@@ -99,7 +99,7 @@ jobs:
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-linux-${{ matrix.platform.arch }}
           path: dist
@@ -131,7 +131,7 @@ jobs:
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-musllinux-${{ matrix.platform.arch }}
           path: dist
@@ -151,7 +151,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Download wheels
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: wheels-linux-x86_64
           path: dist
@@ -177,7 +177,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Download wheels
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: wheels-linux-aarch64
           path: dist
@@ -207,7 +207,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Download wheels
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: wheels-musllinux-${{ matrix.platform.arch }}
           path: dist
@@ -229,7 +229,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -259,7 +259,7 @@ jobs:
       id-token: write  # Required for PyPI trusted publishing
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
