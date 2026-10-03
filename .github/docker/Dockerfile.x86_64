@@ -1,11 +1,9 @@
 # x86_64 manylinux builder for jsrun Python wheels
 
-# Donor stage for a glibc 2.28 sysroot (AlmaLinux 8 based). The rust-cross
-# base image used to ship its own crosstool-ng toolchain + 2.28 sysroot at
-# /usr/x86_64-unknown-linux-gnu, but a mid-2026 rebuild of the mutable tag
-# left that directory empty, so V8 would otherwise compile against the
-# Ubuntu host glibc (2.35) and reference symbols newer than manylinux_2_28
-# allows (e.g. pthread_cond_clockwait, glibc 2.30).
+# Donor stage for a glibc 2.28 sysroot (AlmaLinux 8). The rust-cross base
+# image's own toolchain/sysroot went missing in a mid-2026 rebuild of its
+# mutable tag; without a 2.28 sysroot, V8 compiles against the Ubuntu host
+# glibc and references symbols too new for manylinux_2_28 wheels.
 FROM quay.io/pypa/manylinux_2_28_x86_64 AS sysroot
 
 FROM ghcr.io/rust-cross/manylinux_2_28-cross:x86_64
@@ -38,14 +36,11 @@ ENV CXX=clang-19
 ENV LIBCLANG_PATH=/usr/lib/llvm-19/lib
 ENV PATH=/usr/lib/llvm-19/bin:${PATH}
 
-# glibc 2.28 sysroot donated from the official manylinux image, so V8 is
-# compiled against 2.28 headers. V8 gates newer glibc APIs behind
-# compile-time glibc version checks, so old headers keep the archive
-# manylinux_2_28 compatible.
+# V8 gates newer glibc APIs behind compile-time version checks, so building
+# against 2.28 headers keeps the archive manylinux_2_28 compatible. The gcc
+# dir provides crt objects/libgcc needed when linking host tool executables.
 COPY --from=sysroot /usr/include /opt/manylinux_2_28_sysroot/usr/include
 COPY --from=sysroot /usr/lib64 /opt/manylinux_2_28_sysroot/usr/lib64
-# GCC installation dir: provides crtbeginS.o/crtendS.o, libgcc.a and the
-# libgcc_s.so devel symlink needed when linking host tool executables.
 COPY --from=sysroot /usr/lib/gcc /opt/manylinux_2_28_sysroot/usr/lib/gcc
 RUN ln -s usr/lib64 /opt/manylinux_2_28_sysroot/lib64
 ENV TARGET_SYSROOT=/opt/manylinux_2_28_sysroot

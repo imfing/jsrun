@@ -1,14 +1,10 @@
 name: Build V8 archive
 
-# Builds rusty_v8 from source inside the manylinux_2_28 containers and
-# publishes the static library + src binding as GitHub release assets.
-# The wheel CI consumes these via RUSTY_V8_ARCHIVE/RUSTY_V8_SRC_BINDING_PATH,
-# so V8 only needs to be compiled when the v8 crate version in Cargo.lock
-# changes (run this workflow manually after such a bump).
-#
-# Why from source: denoland's prebuilt archives require glibc >= 2.30
-# (e.g. pthread_cond_clockwait), but manylinux_2_28 wheels must link
-# against glibc 2.28.
+# Compiles rusty_v8 from source inside the manylinux_2_28 containers and
+# publishes the static library + src binding as release assets, which wheel
+# CI consumes via RUSTY_V8_ARCHIVE. Run manually after the v8 version in
+# Cargo.lock changes. (From source because denoland's gnu prebuilts require
+# glibc > 2.28; see .github/docker/Dockerfile.x86_64.)
 
 on:
   workflow_dispatch:
@@ -32,10 +28,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: ${{ fromJSON(
-          inputs.arch == 'x86_64' && '[{"name":"x86_64","target":"x86_64-unknown-linux-gnu","dockerfile":"Dockerfile.x86_64"}]'
-          || inputs.arch == 'aarch64' && '[{"name":"aarch64","target":"aarch64-unknown-linux-gnu","dockerfile":"Dockerfile.aarch64"}]'
-          || '[{"name":"x86_64","target":"x86_64-unknown-linux-gnu","dockerfile":"Dockerfile.x86_64"},{"name":"aarch64","target":"aarch64-unknown-linux-gnu","dockerfile":"Dockerfile.aarch64"}]') }}
+        arch: ${{ fromJSON(inputs.arch == 'all' && '["x86_64","aarch64"]' || format('["{0}"]', inputs.arch)) }}
+    env:
+      TARGET: ${{ matrix.arch }}-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v5
 
@@ -49,19 +44,15 @@ jobs:
       - name: Read v8 version from Cargo.lock
         id: v8
         run: |
-          VERSION=$(sed -n '/^name = "v8"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
-          if [ -z "$VERSION" ]; then
-            echo "::error::Failed to determine v8 crate version from Cargo.lock"
-            exit 1
-          fi
+          VERSION=$(.github/scripts/v8-version.sh)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building archive for rusty_v8 v$VERSION"
 
       - name: Build builder image
         run: |
           docker build \
-            -t jsrun-v8-builder:${{ matrix.arch.name }} \
-            -f .github/docker/${{ matrix.arch.dockerfile }} \
+            -t jsrun-v8-builder:${{ matrix.arch }} \
+            -f .github/docker/Dockerfile.${{ matrix.arch }} \
             .github/docker/
 
       - name: Build V8 from source
@@ -70,16 +61,16 @@ jobs:
           docker run --rm \
             -v "$(pwd):/workdir" \
             -w /workdir \
-            jsrun-v8-builder:${{ matrix.arch.name }} \
-            bash .github/scripts/build-v8-archive.sh ${{ matrix.arch.target }} dist-v8
+            jsrun-v8-builder:${{ matrix.arch }} \
+            bash .github/scripts/build-v8-archive.sh "$TARGET" dist-v8
 
       - name: Upload artifacts to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Prerelease, and deliberately not matching the v* pattern that
+          # triggers release CI.
           TAG="librusty_v8-v${{ steps.v8.outputs.version }}"
-          # Prerelease so archive tags never show up as the "latest" jsrun release.
-          # The tag deliberately does not match the v* pattern that triggers CI.
           gh release view "$TAG" >/dev/null 2>&1 || \
             gh release create "$TAG" \
               --prerelease \

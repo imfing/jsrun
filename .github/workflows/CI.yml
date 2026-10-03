@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
       - uses: astral-sh/setup-uv@v7
-      - uses: dtolnay/rust-toolchain@stable
+      # Rust version comes from rust-toolchain.toml via the preinstalled rustup.
       - name: Test
         run: make all
       - name: Build wheels
@@ -53,10 +53,8 @@ jobs:
           name: wheels-sdist
           path: dist
 
-  # Build manylinux wheels on free GitHub runners, consuming the prebuilt V8
-  # static library published by the "Build V8 archive" workflow. V8 is only
-  # compiled from source when the v8 crate version in Cargo.lock changes;
-  # wheel builds just link against the archive.
+  # Build manylinux wheels against the prebuilt V8 archive published by the
+  # "Build V8 archive" workflow (V8 only compiles when Cargo.lock bumps it).
   linux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -77,11 +75,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(sed -n '/^name = "v8"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
-          if [ -z "$VERSION" ]; then
-            echo "::error::Failed to determine v8 crate version from Cargo.lock"
-            exit 1
-          fi
+          VERSION=$(.github/scripts/v8-version.sh)
           TAG="librusty_v8-v${VERSION}"
           echo "Using prebuilt V8 archive release: $TAG"
           mkdir -p .v8
@@ -101,8 +95,6 @@ jobs:
           target: ${{ matrix.platform.target }}
           manylinux: 2_28
           args: --release --out dist
-          # maturin-action forwards RUST*-prefixed env vars into the build
-          # container; the explicit -e flags are belt and braces.
           docker-options: -e RUSTY_V8_ARCHIVE -e RUSTY_V8_SRC_BINDING_PATH
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
@@ -112,10 +104,8 @@ jobs:
           name: wheels-linux-${{ matrix.platform.arch }}
           path: dist
 
-  # Build musllinux wheels (Alpine and other musl distros). Unlike the gnu
-  # builds, denoland ships musl prebuilts (since rusty_v8 v150.2.0) with no
-  # glibc-versioning concerns, so rusty_v8's build script downloads them
-  # automatically - no self-hosted archive involved.
+  # Build musllinux wheels. denoland ships musl prebuilts (no glibc-style
+  # symbol versioning), which rusty_v8's build script downloads automatically.
   linux-musl:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -133,8 +123,7 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
-          # Python extension modules must link musl libc dynamically; Rust's
-          # musl targets default to a static crt.
+          # Extension modules need dynamic musl; Rust's musl targets default to static crt.
           RUSTFLAGS: -C target-feature=-crt-static
         with:
           target: ${{ matrix.platform.target }}

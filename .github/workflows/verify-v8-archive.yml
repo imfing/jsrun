@@ -1,14 +1,9 @@
 name: Verify V8 archive
 
-# Proves a librusty_v8 static library is actually linkable under the wheel
-# target environment: a whole-archive link into a shared object with
-# -Wl,-z,defs forces every object in the archive to be linked and every
-# undefined symbol to resolve - the same demand the wheel link makes.
-#
-# gnu legs verify OUR archives (built by build-v8-archive.yml) against
-# glibc 2.28; musl legs verify denoland's upstream musl prebuilts (shipped
-# since rusty_v8 v150.2.0) against musllinux_1_2, since those are consumed
-# directly by the musl wheel builds.
+# Proves a librusty_v8 archive is linkable in the wheel target environment:
+# a whole-archive -Wl,-z,defs link makes the same demand the wheel link does.
+# gnu legs verify OUR archives against glibc 2.28; musl legs verify
+# denoland's upstream prebuilts, which the musl wheel builds consume directly.
 
 on:
   workflow_dispatch:
@@ -24,10 +19,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - id: v8
-        run: |
-          VERSION=$(sed -n '/^name = "v8"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "v8 version: $VERSION"
+        run: echo "version=$(.github/scripts/v8-version.sh)" >> "$GITHUB_OUTPUT"
 
   # Container job uses only `run:` steps: node-based actions (checkout etc.)
   # cannot execute inside musl containers (the runner's node is glibc-linked).
@@ -67,6 +59,7 @@ jobs:
       - name: Download archive
         run: |
           VERSION="${{ needs.v8-version.outputs.version }}"
+          echo "v8 version: $VERSION"
           if [ "${{ matrix.target.source }}" = "self" ]; then
             BASE="https://github.com/${{ github.repository }}/releases/download/librusty_v8-v${VERSION}"
           else
@@ -79,12 +72,9 @@ jobs:
 
       - name: Whole-archive link test (-z,defs)
         run: |
-          # Some symbols are intentionally undefined in the C++ archive: they
-          # are rusty_v8's and V8-Temporal's C++->Rust FFI hooks, provided by
-          # the Rust side (v8 and temporal_capi crates) at the final cargo
-          # link. Strategy: attempt the strict link, collect missing symbols,
-          # assert ALL of them are first-party FFI names (anything else -
-          # e.g. a libc symbol - fails the job), then stub and re-link.
+          # C++->Rust FFI hooks are intentionally undefined (cargo provides
+          # them at the real link). Collect missing symbols, assert all are
+          # first-party FFI names (anything else fails), then stub and re-link.
           link() {
             gcc -shared -o /tmp/librusty_v8_test.so \
               -Wl,--whole-archive librusty_v8.a -Wl,--no-whole-archive \
