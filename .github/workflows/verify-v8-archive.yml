@@ -1,0 +1,73 @@
+name: Verify V8 archive
+
+# Proves the published librusty_v8 archive is actually linkable under
+# manylinux_2_28 (glibc 2.28): a whole-archive link into a shared object
+# with -Wl,-z,defs forces every object in the archive to be linked and
+# every undefined symbol to resolve against glibc 2.28 - the same demand
+# the wheel link makes.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify-x86_64:
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux_2_28_x86_64
+    timeout-minutes: 20
+    steps:
+      - name: Show toolchain and glibc version
+        run: |
+          ldd --version | head -1
+          gcc --version | head -1
+
+      - name: Download archive from release
+        run: |
+          curl -sSfL -o librusty_v8.a.gz \
+            https://github.com/${{ github.repository }}/releases/download/librusty_v8-v150.4.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz
+          gunzip librusty_v8.a.gz
+          ls -lh librusty_v8.a
+
+      - name: Whole-archive link test (-z,defs on glibc 2.28)
+        run: |
+          # Some symbols are intentionally undefined in the C++ archive: they
+          # are rusty_v8's and V8-Temporal's C++->Rust FFI hooks, provided by
+          # the Rust side (v8 and temporal_capi crates) at the final cargo
+          # link. Denoland's own prebuilt has the identical undefined set.
+          # Strategy: attempt the strict link, collect missing symbols, assert
+          # ALL of them are first-party FFI names (anything else - e.g. a
+          # glibc symbol - fails the job), then stub and re-link strictly.
+          link() {
+            gcc -shared -o /tmp/librusty_v8_test.so \
+              -Wl,--whole-archive librusty_v8.a -Wl,--no-whole-archive \
+              "$@" \
+              -Wl,-z,defs \
+              -lpthread -ldl -lm -lrt -lgcc_s
+          }
+          if link 2>link_err.txt; then
+            echo "Linked with no stubs needed"
+          else
+            awk -F'`' '/undefined reference to/{split($2,a,"\x27"); print a[1]}' link_err.txt \
+              | sort -u > missing_syms.txt
+            echo "Missing symbols: $(wc -l < missing_syms.txt)"
+            NON_FFI=$(grep -vE '^(temporal_rs_|rusty_v8_|v8__|v8_inspector__|cppgc__|crdtp__)' missing_syms.txt || true)
+            if [ -n "${NON_FFI}" ]; then
+              echo "ERROR: unresolved symbols that are NOT first-party Rust FFI (likely glibc incompatibility):"
+              echo "${NON_FFI}"
+              exit 1
+            fi
+            awk '{print "void "$1"(void) {}"}' missing_syms.txt > stubs.c
+            gcc -c stubs.c -o stubs.o
+            link stubs.o
+          fi
+          ls -lh /tmp/librusty_v8_test.so
+          echo "Whole-archive link succeeded under glibc 2.28"
+
+      - name: Inspect resulting shared object
+        run: |
+          echo "=== glibc version requirements of the linked .so ==="
+          objdump -T /tmp/librusty_v8_test.so | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -5
+          echo "=== NEEDED libraries ==="
+          objdump -p /tmp/librusty_v8_test.so | grep NEEDED

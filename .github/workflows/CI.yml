@@ -8,7 +8,7 @@ on:
 
 permissions:
   contents: write  # Required for creating releases
-  id-token: write  # Required for Workload Identity Federation and PyPI trusted publishing
+  id-token: write  # Required for PyPI trusted publishing
 
 jobs:
 
@@ -53,144 +53,69 @@ jobs:
           name: wheels-sdist
           path: dist
 
-  # Provision GCP Spot VM with self-hosted runner
-  provision:
-    runs-on: ubuntu-latest
-    outputs:
-      runner-name: ${{ steps.create-vm.outputs.runner_name }}
+  # Build manylinux wheels on free GitHub runners, consuming the prebuilt V8
+  # static library published by the "Build V8 archive" workflow. V8 is only
+  # compiled from source when the v8 crate version in Cargo.lock changes;
+  # wheel builds just link against the archive.
+  linux:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            arch: aarch64
     steps:
       - uses: actions/checkout@v5
 
-      - id: auth
-        uses: google-github-actions/auth@v3
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      - uses: google-github-actions/setup-gcloud@v3
-
-      - name: Get GitHub Runner Token
-        id: get-token
+      - name: Resolve prebuilt V8 archive
+        id: v8
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          echo "Requesting runner registration token for ${{ github.repository }}"
-          RESPONSE=$(curl -s -X POST \
-            -H "Authorization: token ${{ secrets.GH_PAT }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token)
-
-          TOKEN=$(echo "$RESPONSE" | jq -r .token)
-
-          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
-            echo "Failed to get registration token"
-            echo "Error message: $(echo "$RESPONSE" | jq -r .message)"
+          VERSION=$(sed -n '/^name = "v8"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
+          if [ -z "$VERSION" ]; then
+            echo "::error::Failed to determine v8 crate version from Cargo.lock"
             exit 1
           fi
+          TAG="librusty_v8-v${VERSION}"
+          echo "Using prebuilt V8 archive release: $TAG"
+          mkdir -p .v8
+          if ! gh release download "$TAG" --repo "${{ github.repository }}" \
+               --pattern "src_binding_release_${{ matrix.platform.target }}.rs" --dir .v8; then
+            echo "::error::Missing release $TAG (asset src_binding_release_${{ matrix.platform.target }}.rs). Run the 'Build V8 archive' workflow after bumping v8 in Cargo.lock."
+            exit 1
+          fi
+          echo "archive_url=https://github.com/${{ github.repository }}/releases/download/${TAG}/librusty_v8_release_${{ matrix.platform.target }}.a.gz" >> "$GITHUB_OUTPUT"
 
-          echo "::add-mask::$TOKEN"
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
-          echo "Successfully obtained registration token"
-
-      - name: Create Spot VM
-        id: create-vm
-        run: |
-          RUNNER_NAME="gcp-runner-${{ github.run_id }}-${{ github.run_attempt }}"
-          echo "runner_name=$RUNNER_NAME" >> $GITHUB_OUTPUT
-
-          gcloud compute instances create $RUNNER_NAME \
-            --zone=${{ vars.GCP_ZONE || 'us-central1-a' }} \
-            --machine-type=${{ vars.GCP_MACHINE_TYPE || 'n2-highcpu-32' }} \
-            --provisioning-model=SPOT \
-            --instance-termination-action=DELETE \
-            --image-family=ubuntu-2204-lts \
-            --image-project=ubuntu-os-cloud \
-            --boot-disk-size=200GB \
-            --metadata=runner-token=${{ steps.get-token.outputs.token }},repo-url=https://github.com/${{ github.repository }},runner-name=$RUNNER_NAME \
-            --metadata-from-file=startup-script=.github/scripts/startup.sh
-
-      - name: Wait for Runner Registration
-        run: |
-          echo "Waiting for runner to register..."
-          for i in {1..60}; do
-            if curl -s -H "Authorization: token ${{ secrets.GH_PAT }}" \
-              https://api.github.com/repos/${{ github.repository }}/actions/runners \
-              | jq -e '.runners[] | select(.name == "${{ steps.create-vm.outputs.runner_name }}")' > /dev/null; then
-              echo "Runner registered successfully!"
-              exit 0
-            fi
-            echo "Attempt $i/60: Runner not yet registered, waiting 10s..."
-            sleep 10
-          done
-          echo "Runner failed to register within 10 minutes"
-          exit 1
-
-  # Build manylinux wheels (x86_64 and aarch64) on self-hosted GCP runner
-  build-wheels-manylinux:
-    needs: provision
-    runs-on: [self-hosted, gcp, spot]
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Verify runner environment
-        run: |
-          echo "Building manylinux wheels"
-          echo "Runner name: ${{ runner.name }}"
-          echo "Runner OS: ${{ runner.os }}"
-          echo "Branch: ${{ github.ref }}"
-          echo "Commit: ${{ github.sha }}"
-          uname -a
-          df -h
-          free -h
-          docker --version
-
-      # Build x86_64
-      - name: Build x86_64 Docker image
-        run: |
-          docker build \
-            -t jsrun-manylinux-builder:x86_64 \
-            -f .github/docker/Dockerfile.x86_64 \
-            .github/docker/
-
-      - name: Build x86_64 wheels in Docker
-        run: |
-          mkdir -p dist
-          docker run --rm \
-            -v "$(pwd):/workdir" \
-            -w /workdir \
-            jsrun-manylinux-builder:x86_64 \
-            bash .github/scripts/build-manylinux-wheels.sh x86_64-unknown-linux-gnu
-
-      # Build aarch64
-      - name: Build aarch64 Docker image
-        run: |
-          docker build \
-            -t jsrun-manylinux-builder:aarch64 \
-            -f .github/docker/Dockerfile.aarch64 \
-            .github/docker/
-
-      - name: Build aarch64 wheels in Docker
-        run: |
-          mkdir -p dist
-          docker run --rm \
-            -v "$(pwd):/workdir" \
-            -w /workdir \
-            jsrun-manylinux-builder:aarch64 \
-            bash .github/scripts/build-manylinux-wheels.sh aarch64-unknown-linux-gnu
-
-      # Upload all wheels
-      - name: List all built wheels
-        run: |
-          echo "All built wheels:"
-          ls -lh dist/
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          RUSTY_V8_ARCHIVE: ${{ steps.v8.outputs.archive_url }}
+          RUSTY_V8_SRC_BINDING_PATH: ${{ github.workspace }}/.v8/src_binding_release_${{ matrix.platform.target }}.rs
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: 2_28
+          args: --release --out dist
+          # maturin-action forwards RUST*-prefixed env vars into the build
+          # container; the explicit -e flags are belt and braces.
+          docker-options: -e RUSTY_V8_ARCHIVE -e RUSTY_V8_SRC_BINDING_PATH
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
         with:
-          name: wheels-linux-manylinux
-          path: dist/*.whl
+          name: wheels-linux-${{ matrix.platform.arch }}
+          path: dist
 
-  # Test built manylinux wheels on GitHub ubuntu runners
+  # Test built manylinux wheels against all supported Python versions.
+  # A single cp310-abi3 wheel per architecture covers 3.10+.
   test-wheels-x86_64:
-    needs: build-wheels-manylinux
+    needs: linux
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -201,10 +126,10 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - name: Download manylinux wheels
+      - name: Download wheels
         uses: actions/download-artifact@v6
         with:
-          name: wheels-linux-manylinux
+          name: wheels-linux-x86_64
           path: dist
       - name: Install and test wheel
         run: |
@@ -216,60 +141,34 @@ jobs:
           pytest tests/ -v
 
   test-wheels-aarch64:
-    needs: build-wheels-manylinux
-    runs-on: ubuntu-latest
+    needs: linux
+    runs-on: ubuntu-24.04-arm
     strategy:
       matrix:
         python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
       fail-fast: false
     steps:
       - uses: actions/checkout@v5
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: actions/setup-python@v6
         with:
-          platforms: arm64
-      - name: Download manylinux wheels
+          python-version: ${{ matrix.python-version }}
+      - name: Download wheels
         uses: actions/download-artifact@v6
         with:
-          name: wheels-linux-manylinux
+          name: wheels-linux-aarch64
           path: dist
-      - name: Test wheel in aarch64 container
+      - name: Install and test wheel
         run: |
+          python -m pip install --upgrade pip
           WHEEL=$(ls dist/*cp310-abi3*aarch64.whl | head -n 1)
-          echo "Testing wheel: $WHEEL"
-          docker run --rm --platform linux/arm64 \
-            -v "$(pwd):/work" \
-            -w /work \
-            python:${{ matrix.python-version }}-slim \
-            bash -c "
-              pip install --upgrade pip && \
-              pip install $WHEEL && \
-              pip install pytest pytest-asyncio && \
-              pytest tests/ -v
-            "
-
-  # Cleanup: Delete the GCP VM
-  cleanup:
-    needs: [provision, build-wheels-manylinux]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - uses: google-github-actions/auth@v3
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      - uses: google-github-actions/setup-gcloud@v3
-
-      - name: Delete VM
-        run: |
-          gcloud compute instances delete ${{ needs.provision.outputs.runner-name }} \
-            --zone=${{ vars.GCP_ZONE || 'us-central1-a' }} \
-            --quiet || echo "VM may have already been terminated"
+          echo "Installing wheel: $WHEEL"
+          pip install "$WHEEL"
+          pip install pytest pytest-asyncio
+          pytest tests/ -v
 
   # Create GitHub Release with all artifacts
   release:
-    needs: [macos, sdist, build-wheels-manylinux, test-wheels-x86_64, test-wheels-aarch64]
+    needs: [macos, sdist, linux, test-wheels-x86_64, test-wheels-aarch64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
