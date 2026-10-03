@@ -1,36 +1,23 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build a prebuilt rusty_v8 static library archive for reuse by wheel builds.
-#
-# Runs inside the manylinux builder containers (.github/docker/Dockerfile.*)
-# with the repository mounted at the working directory. Produces the same
-# artifact layout as denoland's rusty_v8 releases:
-#   librusty_v8_release_{target}.a.gz
-#   src_binding_release_{target}.rs
+# Build a prebuilt rusty_v8 static library archive for reuse by wheel builds
+# (same artifact layout as denoland's rusty_v8 releases). Runs inside the
+# manylinux builder containers with the repository mounted at the workdir.
 #
 # Usage: ./build-v8-archive.sh TARGET_TRIPLE [OUTPUT_DIR]
-#   TARGET_TRIPLE: x86_64-unknown-linux-gnu or aarch64-unknown-linux-gnu
-#   OUTPUT_DIR: dist-v8 (default)
 
 TARGET_ARCH="${1:?Usage: build-v8-archive.sh TARGET_TRIPLE [OUTPUT_DIR]}"
 OUTPUT_DIR="${2:-dist-v8}"
 
-V8_VERSION=$(sed -n '/^name = "v8"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
-if [ -z "${V8_VERSION}" ]; then
-  echo "Failed to determine v8 crate version from Cargo.lock" >&2
-  exit 1
-fi
+V8_VERSION=$("$(dirname "$0")/v8-version.sh")
 
 echo "=== Building rusty_v8 v${V8_VERSION} from source for ${TARGET_ARCH} ==="
 rustc --version
 cargo --version
 
-# The rust-cross base images configure CARGO_TARGET_*_LINKER env vars, but
-# the mutable image tags drift and the referenced cross-gcc may no longer
-# exist (observed with x86_64-unknown-linux-gnu-gcc). Only host build
-# scripts are linked here (-p v8 produces an rlib), so fall back to the
-# clang installed by our Dockerfiles when a configured linker is missing.
+# The mutable base-image tags drift; fall back to our clang when a configured
+# linker is missing (only host build scripts are linked; -p v8 yields an rlib).
 for var in $(env | sed -n 's/^\(CARGO_TARGET_[A-Z0-9_]*_LINKER\)=.*/\1/p'); do
   linker="${!var}"
   if ! command -v "${linker}" >/dev/null 2>&1; then
@@ -39,13 +26,10 @@ for var in $(env | sed -n 's/^\(CARGO_TARGET_[A-Z0-9_]*_LINKER\)=.*/\1/p'); do
   fi
 done
 
-# The crates.io package is missing files required for from-source builds,
-# so patch v8 to the matching git tag.
+# crates.io package lacks files needed for from-source builds; use the git tag.
 if ! grep -q "\[patch.crates-io\]" Cargo.toml; then
   cat >> Cargo.toml <<EOF
 
-# Patched by build script: use V8 from git (crates.io package lacks files
-# needed for from-source builds)
 [patch.crates-io]
 v8 = { git = "https://github.com/denoland/rusty_v8", tag = "v${V8_VERSION}" }
 EOF
@@ -67,8 +51,7 @@ for artifact in "${STATIC_LIB}" "${SRC_BINDING}"; do
   fi
 done
 
-# Diagnostics: show the GN args that were actually resolved and whether the
-# sysroot made it into the compile commands.
+# Diagnostics: resolved gn args and whether the sysroot reached the compiler.
 GN_OUT_DIR="${BUILD_DIR}/gn_out"
 if [ -f "${GN_OUT_DIR}/args.gn" ]; then
   echo "=== resolved gn args (${GN_OUT_DIR}/args.gn) ==="
@@ -77,10 +60,9 @@ fi
 echo "=== --sysroot flags in ninja compile commands ==="
 grep -rho -- "--sysroot=[^ \"]*" "${GN_OUT_DIR}"/*.ninja 2>/dev/null | sort | uniq -c || echo "(none found)"
 
-# Guard against glibc drift: the archive must stay linkable under
-# manylinux_2_28 (glibc 2.28). Fail loudly if the static lib references
-# symbols introduced in later glibc versions (the denylist covers known
-# offenders from glibc 2.29-2.38; extend it if auditwheel ever complains).
+# The archive must stay linkable under manylinux_2_28 (glibc 2.28): fail on
+# strong references to newer glibc symbols instead of publishing a broken
+# artifact. Weak references are harmless (linker leaves them null).
 GLIBC_POST_228_SYMBOLS='^(pthread_cond_clockwait|pthread_mutex_clocklock|pthread_rwlock_clockrdlock|pthread_rwlock_clockwrlock|sem_clockwait|pthread_clockjoin_np|gettid|getdents64|__libc_single_threaded|arc4random|arc4random_buf|arc4random_uniform|close_range|__isoc23_.*)$'
 UNDEFINED_SYMBOLS=""
 for nm_bin in llvm-nm "${TARGET_ARCH}-nm" nm; do
@@ -96,8 +78,6 @@ if [ -z "${UNDEFINED_SYMBOLS}" ]; then
   echo "ERROR: no nm tool in the image could read ${STATIC_LIB}; refusing to publish unaudited archive" >&2
   exit 1
 fi
-# Only strong undefined references ("U") are fatal: weak ones ("w"/"v") are
-# left null by the linker on older glibc and handled by runtime fallbacks.
 WEAK_MATCHES=$(echo "${UNDEFINED_SYMBOLS}" | awk '$1 == "w" || $1 == "v" {print $2}' | sort -u | grep -E "${GLIBC_POST_228_SYMBOLS}" || true)
 if [ -n "${WEAK_MATCHES}" ]; then
   echo "Note: weak references to post-2.28 symbols (harmless): ${WEAK_MATCHES}"

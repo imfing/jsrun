@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
       - uses: astral-sh/setup-uv@v7
-      - uses: dtolnay/rust-toolchain@stable
+      # Rust version comes from rust-toolchain.toml via the preinstalled rustup.
       - name: Test
         run: make all
       - name: Build wheels
@@ -33,7 +33,7 @@ jobs:
           args: --release --out dist
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-macos-${{ matrix.platform.target }}
           path: dist
@@ -41,22 +41,20 @@ jobs:
   sdist:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: --out dist
       - name: Upload sdist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist
           path: dist
 
-  # Build manylinux wheels on free GitHub runners, consuming the prebuilt V8
-  # static library published by the "Build V8 archive" workflow. V8 is only
-  # compiled from source when the v8 crate version in Cargo.lock changes;
-  # wheel builds just link against the archive.
+  # Build manylinux wheels against the prebuilt V8 archive published by the
+  # "Build V8 archive" workflow (V8 only compiles when Cargo.lock bumps it).
   linux:
     runs-on: ${{ matrix.platform.runner }}
     strategy:
@@ -77,11 +75,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION=$(sed -n '/^name = "v8"$/{n;s/^version = "\(.*\)"/\1/p;}' Cargo.lock)
-          if [ -z "$VERSION" ]; then
-            echo "::error::Failed to determine v8 crate version from Cargo.lock"
-            exit 1
-          fi
+          VERSION=$(.github/scripts/v8-version.sh)
           TAG="librusty_v8-v${VERSION}"
           echo "Using prebuilt V8 archive release: $TAG"
           mkdir -p .v8
@@ -101,15 +95,45 @@ jobs:
           target: ${{ matrix.platform.target }}
           manylinux: 2_28
           args: --release --out dist
-          # maturin-action forwards RUST*-prefixed env vars into the build
-          # container; the explicit -e flags are belt and braces.
           docker-options: -e RUSTY_V8_ARCHIVE -e RUSTY_V8_SRC_BINDING_PATH
           sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
       - name: Upload wheels
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wheels-linux-${{ matrix.platform.arch }}
+          path: dist
+
+  # Build musllinux wheels. denoland ships musl prebuilts (no glibc-style
+  # symbol versioning), which rusty_v8's build script downloads automatically.
+  linux-musl:
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build wheels
+        uses: PyO3/maturin-action@v1
+        env:
+          # Extension modules need dynamic musl; Rust's musl targets default to static crt.
+          RUSTFLAGS: -C target-feature=-crt-static
+        with:
+          target: ${{ matrix.platform.target }}
+          manylinux: musllinux_1_2
+          args: --release --out dist
+          sccache: ${{ !startsWith(github.ref, 'refs/tags/') }}
+      - name: Upload wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: wheels-musllinux-${{ matrix.platform.arch }}
           path: dist
 
   # Test built manylinux wheels against all supported Python versions.
@@ -127,7 +151,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Download wheels
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: wheels-linux-x86_64
           path: dist
@@ -153,7 +177,7 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - name: Download wheels
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           name: wheels-linux-aarch64
           path: dist
@@ -166,16 +190,46 @@ jobs:
           pip install pytest pytest-asyncio
           pytest tests/ -v
 
+  # Test musllinux wheels inside Alpine containers (run via docker rather
+  # than `container:` because node-based actions cannot execute on musl).
+  test-wheels-musl:
+    needs: linux-musl
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@v5
+      - name: Download wheels
+        uses: actions/download-artifact@v8
+        with:
+          name: wheels-musllinux-${{ matrix.platform.arch }}
+          path: dist
+      - name: Test wheel in Alpine container
+        run: |
+          WHEEL=$(ls dist/*cp310-abi3*musllinux*${{ matrix.platform.arch }}.whl | head -n 1)
+          echo "Testing wheel: $WHEEL"
+          docker run --rm \
+            -v "$(pwd):/work" -w /work \
+            python:${{ matrix.python-version }}-alpine \
+            sh -c "pip install --upgrade pip && pip install $WHEEL pytest pytest-asyncio && pytest tests/ -q"
+
   # Create GitHub Release with all artifacts
   release:
-    needs: [macos, sdist, linux, test-wheels-x86_64, test-wheels-aarch64]
+    needs: [macos, sdist, linux, linux-musl, test-wheels-x86_64, test-wheels-aarch64, test-wheels-musl]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v5
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -205,7 +259,7 @@ jobs:
       id-token: write  # Required for PyPI trusted publishing
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v6
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
