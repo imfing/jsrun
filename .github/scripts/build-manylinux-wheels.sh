@@ -44,7 +44,6 @@ maturin build \
   --manylinux "${MANYLINUX_VERSION}" \
   --release \
   --out "${OUTPUT_DIR}" \
-  --find-interpreter \
   -vv
 
 echo "=== Build completed successfully ==="
