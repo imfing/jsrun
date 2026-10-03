@@ -200,6 +200,7 @@ mod tests {
             is_async: false,
             is_promise_all: false,
             promise_index: None,
+            is_wasm: false,
         }
     }
 
@@ -208,6 +209,7 @@ mod tests {
             name: Some("TypeError".to_string()),
             message: Some("boom".to_string()),
             stack: Some("TypeError: boom\n    at <eval>:1:1".to_string()),
+            stack_is_custom: false,
             cause: None,
             exception_message: "Uncaught TypeError: boom".to_string(),
             frames: vec![sample_js_frame()],

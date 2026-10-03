@@ -1,11 +1,11 @@
 """High-level Python bindings for the jsrun runtime."""
 
-import contextvars
 import asyncio
 import atexit
+import contextvars
 import threading
-from dataclasses import dataclass
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, TypeVar, cast, overload
 
 from ._jsrun import (
@@ -92,7 +92,7 @@ def _schedule_owner_cleanup(slot: _RuntimeSlot) -> None:
         owner.add_done_callback(lambda _: slot.close())
 
 
-setattr(Runtime, "bind", _runtime_bind)
+Runtime.bind = _runtime_bind
 
 
 _default_runtime_var: contextvars.ContextVar[_RuntimeSlot | None] = (
@@ -234,22 +234,22 @@ def bind_object(name: str, obj: dict) -> None:
 
 
 __all__ = [
+    "InspectorConfig",
+    "InspectorEndpoints",
+    "JavaScriptError",
+    "JsFunction",
+    "JsStream",
+    "JsUndefined",
+    "Runtime",
+    "RuntimeConfig",
+    "RuntimeStats",
+    "RuntimeTerminated",
+    "SnapshotBuilder",
+    "bind_function",
+    "bind_object",
+    "close_default_runtime",
     "eval",
     "eval_async",
     "get_default_runtime",
-    "close_default_runtime",
-    "bind_function",
-    "bind_object",
-    "Runtime",
-    "RuntimeConfig",
-    "InspectorConfig",
-    "InspectorEndpoints",
-    "SnapshotBuilder",
-    "JsFunction",
-    "JsUndefined",
-    "RuntimeStats",
-    "JavaScriptError",
-    "RuntimeTerminated",
     "undefined",
-    "JsStream",
 ]

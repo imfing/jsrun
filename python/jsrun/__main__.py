@@ -54,7 +54,7 @@ def main() -> None:
     except JavaScriptError as e:
         print(f"JavaScript Error: {e}", file=sys.stderr)
         sys.exit(1)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - CLI entrypoint reports any failure
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 

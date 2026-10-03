@@ -245,7 +245,7 @@ class TestModuleErrors:
         """Test that module syntax errors are reported."""
         with Runtime() as rt:
             rt.add_static_module("bad", "export const x = ;")  # Syntax error
-            with pytest.raises(Exception):
+            with pytest.raises(RuntimeError):
                 rt.eval_module("bad")
 
     def test_async_loader_with_sync_eval_fails(self):

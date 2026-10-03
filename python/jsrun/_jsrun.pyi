@@ -3,13 +3,13 @@ Type stubs for the jsrun Python extension module.
 """
 
 import types
-from datetime import timedelta
 from collections.abc import AsyncIterable, Awaitable, Callable, Mapping
+from datetime import timedelta
 from typing import (
     Any,
     Self,
-    TypeVar,
     TypedDict,
+    TypeVar,
     overload,
 )
 
@@ -17,18 +17,18 @@ __all__ = [
     "InspectorConfig",
     "InspectorEndpoints",
     "JavaScriptError",
-    "Runtime",
-    "RuntimeConfig",
-    "RuntimeStats",
     "JsFunction",
     "JsStream",
     "JsUndefined",
+    "Runtime",
+    "RuntimeConfig",
+    "RuntimeStats",
     "RuntimeTerminated",
     "SnapshotBuilder",
     "undefined",
 ]
 
-F = TypeVar("F", bound=Callable[..., Any])
+_F = TypeVar("_F", bound=Callable[..., Any])
 
 # Core runtime types
 
@@ -58,7 +58,6 @@ class InspectorConfig:
             target_url: Optional string reported to DevTools for the inspected target
             display_name: Optional display title surfaced in ``chrome://inspect``
         """
-        ...
 
     @property
     def host(self) -> str: ...
@@ -82,9 +81,6 @@ class InspectorConfig:
     def display_name(self, value: str | None) -> None: ...
     def endpoint(self) -> str:
         """Return the ``host:port`` pair that DevTools should connect to."""
-        ...
-
-    def __repr__(self) -> str: ...
 
 class RuntimeConfig:
     """
@@ -99,7 +95,7 @@ class RuntimeConfig:
         max_heap_size: int | None = None,
         initial_heap_size: int | None = None,
         bootstrap: str | None = None,
-        timeout: float | int | None = None,
+        timeout: float | None = None,
         enable_console: bool | None = False,
         inspector: InspectorConfig | None = None,
         snapshot: bytes | None = None,
@@ -120,89 +116,71 @@ class RuntimeConfig:
             max_serialization_depth: Maximum nesting depth when transferring values
             max_serialization_bytes: Maximum serialized byte size when transferring values
         """
-        ...
 
     @property
     def max_heap_size(self) -> int | None:
         """Maximum heap size in bytes."""
-        ...
 
     @max_heap_size.setter
     def max_heap_size(self, bytes: int) -> None:
         """Set maximum heap size in bytes."""
-        ...
 
     @property
     def initial_heap_size(self) -> int | None:
         """Initial heap size in bytes."""
-        ...
 
     @initial_heap_size.setter
     def initial_heap_size(self, bytes: int) -> None:
         """Set initial heap size in bytes."""
-        ...
 
     @property
     def bootstrap(self) -> str | None:
         """Bootstrap script to execute on runtime startup."""
-        ...
 
     @bootstrap.setter
     def bootstrap(self, source: str) -> None:
         """Set bootstrap script to execute on runtime startup."""
-        ...
 
     @property
     def timeout(self) -> float | None:
         """Execution timeout in seconds."""
-        ...
 
     @timeout.setter
-    def timeout(self, timeout: float | int) -> None:
+    def timeout(self, timeout: float) -> None:
         """
         Set execution timeout.
 
         Args:
             timeout: Timeout in seconds (float or int)
         """
-        ...
 
     @property
     def enable_console(self) -> bool | None:
         """Whether ``console`` APIs are enabled inside the runtime."""
-        ...
 
     @property
     def inspector(self) -> InspectorConfig | None:
         """Inspector configuration if debugging is enabled."""
-        ...
 
     @inspector.setter
     def inspector(self, value: InspectorConfig | None) -> None:
         """Set or clear the inspector configuration."""
-        ...
 
     @property
     def max_serialization_depth(self) -> int:
         """Maximum recursion depth allowed when serializing values."""
-        ...
 
     @max_serialization_depth.setter
     def max_serialization_depth(self, value: int) -> None:
         """Set the maximum recursion depth allowed when serializing values."""
-        ...
 
     @property
     def max_serialization_bytes(self) -> int:
         """Maximum byte size allowed when serializing values."""
-        ...
 
     @max_serialization_bytes.setter
     def max_serialization_bytes(self, value: int) -> None:
         """Set the maximum byte size allowed when serializing values."""
-        ...
-
-    def __repr__(self) -> str: ...
 
 class RuntimeStats:
     """
@@ -241,119 +219,94 @@ class RuntimeStats:
     @property
     def heap_total_bytes(self) -> int:
         """Total heap size in bytes allocated by V8."""
-        ...
 
     @property
     def heap_used_bytes(self) -> int:
         """Currently used heap memory in bytes."""
-        ...
 
     @property
     def external_memory_bytes(self) -> int:
         """External memory tracked by V8 (e.g., ArrayBuffers)."""
-        ...
 
     @property
     def physical_total_bytes(self) -> int:
         """Physical memory in bytes (RSS)."""
-        ...
 
     @property
     def total_execution_time_ms(self) -> int:
         """Cumulative execution time in milliseconds."""
-        ...
 
     @property
     def last_execution_time_ms(self) -> int:
         """Duration of the most recent execution in milliseconds."""
-        ...
 
     @property
     def last_execution_kind(self) -> str | None:
         """Type of last operation (e.g., "eval_async", "call_function_sync")."""
-        ...
 
     @property
     def eval_sync_count(self) -> int:
         """Number of synchronous eval operations."""
-        ...
 
     @property
     def eval_async_count(self) -> int:
         """Number of asynchronous eval operations."""
-        ...
 
     @property
     def eval_module_sync_count(self) -> int:
         """Number of synchronous module evaluations."""
-        ...
 
     @property
     def eval_module_async_count(self) -> int:
         """Number of asynchronous module evaluations."""
-        ...
 
     @property
     def call_function_async_count(self) -> int:
         """Number of asynchronous function calls."""
-        ...
 
     @property
     def call_function_sync_count(self) -> int:
         """Number of synchronous function calls."""
-        ...
 
     @property
     def active_async_ops(self) -> int:
         """Currently active async operations."""
-        ...
 
     @property
     def open_resources(self) -> int:
         """Number of open resources (timers, streams, etc.)."""
-        ...
 
     @property
     def active_timers(self) -> int:
         """Active setTimeout timers."""
-        ...
 
     @property
     def active_intervals(self) -> int:
         """Active setInterval timers."""
-        ...
 
     @property
     def active_js_streams(self) -> int:
         """Active JavaScript ReadableStreams exposed to Python."""
-        ...
 
     @property
     def active_py_streams(self) -> int:
         """Active Python async iterables exposed to JavaScript."""
-        ...
 
     @property
     def total_js_streams(self) -> int:
         """Total JavaScript streams created."""
-        ...
 
     @property
     def total_py_streams(self) -> int:
         """Total Python streams created."""
-        ...
 
     @property
     def bytes_streamed_js_to_py(self) -> int:
         """Total bytes transferred from JavaScript to Python."""
-        ...
 
     @property
     def bytes_streamed_py_to_js(self) -> int:
         """Total bytes transferred from Python to JavaScript."""
-        ...
-
-    def __repr__(self) -> str: ...
 
 class InspectorEndpoints:
     """
@@ -379,8 +332,6 @@ class InspectorEndpoints:
     favicon_url: str
     host: str
 
-    def __repr__(self) -> str: ...
-
 class JsFunction:
     """
     Proxy for a JavaScript function returned from the runtime.
@@ -391,7 +342,7 @@ class JsFunction:
     """
 
     def __call__(
-        self, *args: Any, timeout: float | int | timedelta | None = ...
+        self, *args: Any, timeout: float | timedelta | None = ...
     ) -> Any | Awaitable[Any]:
         """
         Invoke the JavaScript function with the provided arguments. If the JS
@@ -405,16 +356,14 @@ class JsFunction:
         Returns:
             Either the JavaScript return value or an awaitable resolving to it.
         """
-        ...
 
     def call_async(
-        self, *args: Any, timeout: float | int | timedelta | None = ...
+        self, *args: Any, timeout: float | timedelta | None = ...
     ) -> Awaitable[Any]:
         """
         Always invoke the JavaScript function asynchronously, returning an awaitable
         regardless of whether the underlying JS completes synchronously.
         """
-        ...
 
     def close(self) -> Awaitable[None]:
         """
@@ -422,9 +371,6 @@ class JsFunction:
 
         After closing, the proxy can no longer be awaited.
         """
-        ...
-
-    def __repr__(self) -> str: ...
 
 class JsStream:
     """
@@ -440,13 +386,9 @@ class JsStream:
             StopAsyncIteration: When the stream finishes.
             JavaScriptError: If the stream reader errors.
         """
-        ...
 
     def close(self) -> None:
         """Cancel the stream and release its runtime resources."""
-        ...
-
-    def __repr__(self) -> str: ...
 
 class PyStreamSource:
     """
@@ -454,7 +396,6 @@ class PyStreamSource:
     """
 
     def close(self) -> None: ...
-    def __repr__(self) -> str: ...
 
 class JsUndefined:
     """
@@ -462,8 +403,6 @@ class JsUndefined:
     """
 
     def __bool__(self) -> bool: ...
-    def __repr__(self) -> str: ...
-    def __str__(self) -> str: ...
 
 undefined: JsUndefined
 
@@ -506,14 +445,8 @@ class JavaScriptError(Exception):
     stack: str | None
     frames: list[JsFrame]
 
-    def __str__(self) -> str: ...
-    def __repr__(self) -> str: ...
-
 class RuntimeTerminated(RuntimeError):
     """Raised when JavaScript execution is aborted by Runtime.terminate()."""
-
-    def __str__(self) -> str: ...
-    def __repr__(self) -> str: ...
 
 class Runtime:
     """
@@ -534,7 +467,6 @@ class Runtime:
             config: Optional :class:`RuntimeConfig` to customize heap limits, bootstrap
                 scripts, inspector, etc.
         """
-        ...
     def eval(self, code: str) -> Any:
         """
         Evaluate JavaScript code synchronously.
@@ -560,10 +492,9 @@ class Runtime:
             2
             ```
         """
-        ...
 
     async def eval_async(
-        self, code: str, *, timeout: float | int | timedelta | None = None
+        self, code: str, *, timeout: float | timedelta | None = None
     ) -> Any:
         """
         Evaluate JavaScript code asynchronously.
@@ -590,7 +521,6 @@ class Runtime:
             42
             ```
         """
-        ...
 
     def register_op(
         self,
@@ -628,7 +558,6 @@ class Runtime:
             >>> # From JavaScript: __host_op_sync__(op_id, 10, 20)  # Returns 30
             ```
         """
-        ...
 
     def is_closed(self) -> bool:
         """
@@ -637,7 +566,6 @@ class Runtime:
         Returns:
             True if the runtime is closed, False otherwise
         """
-        ...
 
     def get_stats(self) -> RuntimeStats:
         """
@@ -646,7 +574,6 @@ class Runtime:
         Returns:
             RuntimeStats: Structured metrics describing the runtime state.
         """
-        ...
 
     def inspector_endpoints(self) -> InspectorEndpoints | None:
         """
@@ -656,7 +583,6 @@ class Runtime:
             InspectorEndpoints: describing websocket and devtools:// URLs, or \
                 ``None`` when the runtime was created without inspector support.
         """
-        ...
 
     def close(self) -> None:
         """
@@ -666,7 +592,6 @@ class Runtime:
         This method is called automatically when using the runtime
         as a context manager.
         """
-        ...
 
     def terminate(self) -> None:
         """
@@ -675,7 +600,6 @@ class Runtime:
         Must be invoked from the same thread that owns the runtime. After
         termination, subsequent operations raise ``RuntimeTerminated``.
         """
-        ...
 
     def bind_function(
         self,
@@ -705,7 +629,6 @@ class Runtime:
             3
             ```
         """
-        ...
 
     def stream_from_async_iterable(
         self, iterable: AsyncIterable[Any]
@@ -719,19 +642,16 @@ class Runtime:
         Returns:
             Handle that can be passed into JavaScript and consumed via stream readers.
         """
-        ...
 
     @overload
-    def bind(self, handler: F, /, *, name: str | None = ...) -> F:
+    def bind(self, handler: _F, /, *, name: str | None = ...) -> _F:
         """Bind a synchronous or asynchronous callable to ``globalThis``."""
-        ...
 
     @overload
     def bind(
         self, handler: None = ..., /, *, name: str | None = ...
-    ) -> Callable[[F], F]:
+    ) -> Callable[[_F], _F]:
         """Return a decorator for binding sync or async callables to ``globalThis``."""
-        ...
 
     def bind_object(self, name: str, obj: Mapping[str, Any]) -> None:
         """
@@ -756,7 +676,6 @@ class Runtime:
             42
             ```
         """
-        ...
 
     def set_module_resolver(self, resolver: Callable[[str, str], str | None]) -> None:
         """
@@ -783,7 +702,6 @@ class Runtime:
             >>> runtime.set_module_resolver(my_resolver)
             ```
         """
-        ...
 
     def set_module_loader(self, loader: Callable[[str], Any]) -> None:
         """
@@ -811,7 +729,6 @@ class Runtime:
             >>> runtime.set_module_loader(my_loader)
             ```
         """
-        ...
 
     def add_static_module(self, name: str, source: str) -> None:
         """
@@ -832,7 +749,6 @@ class Runtime:
             42
             ```
         """
-        ...
 
     def eval_module(self, specifier: str) -> Any:
         """
@@ -859,10 +775,9 @@ class Runtime:
             42
             ```
         """
-        ...
 
     async def eval_module_async(
-        self, specifier: str, *, timeout: float | int | timedelta | None = None
+        self, specifier: str, *, timeout: float | timedelta | None = None
     ) -> Any:
         """
         Evaluate a JavaScript module asynchronously.
@@ -889,11 +804,9 @@ class Runtime:
             42
             ```
         """
-        ...
 
     def __enter__(self) -> Self:
         """Context manager entry - returns self."""
-        ...
 
     def __exit__(
         self,
@@ -902,9 +815,6 @@ class Runtime:
         exc_tb: types.TracebackType | None,
     ) -> bool:
         """Context manager exit - closes the runtime."""
-        ...
-
-    def __repr__(self) -> str: ...
 
 class SnapshotBuilder:
     """
@@ -928,7 +838,6 @@ class SnapshotBuilder:
             enable_console: Whether ``console`` APIs remain available while preparing the snapshot.
                 Defaults to ``False`` (console is disabled by default).
         """
-        ...
 
     def execute_script(self, name: str, source: str) -> None:
         """
@@ -941,10 +850,8 @@ class SnapshotBuilder:
                 rejected. Wrap CommonJS bundles or other globals in an IIFE before
                 calling this method so only plain script statements reach V8.
         """
-        ...
 
     def build(self) -> bytes:
         """
         Finalize the snapshot and return its serialized bytes.
         """
-        ...

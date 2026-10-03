@@ -287,7 +287,6 @@ class TestOpValueConversions:
 
             def capture(value):
                 captured.append(value)
-                return None
 
             op_id = runtime.register_op("captureBytes", capture, mode="sync")
             runtime.eval(f"__host_op_sync__({op_id}, new Uint8Array([1, 2, 3]))")
@@ -317,7 +316,6 @@ class TestOpValueConversions:
 
             def capture(value):
                 captured.append(value)
-                return None
 
             op_id = runtime.register_op("captureDate", capture, mode="sync")
             runtime.eval(f"__host_op_sync__({op_id}, new Date(1704067200000))")
@@ -348,7 +346,6 @@ class TestOpValueConversions:
 
             def capture(value):
                 captured.append(value)
-                return None
 
             op_id = runtime.register_op("captureSet", capture, mode="sync")
             runtime.eval(f"__host_op_sync__({op_id}, new Set([1, 2, 3]))")
@@ -378,7 +375,6 @@ class TestOpValueConversions:
 
             def capture(value):
                 captured.append(value)
-                return None
 
             op_id = runtime.register_op("captureBigInt", capture, mode="sync")
             runtime.eval(f"__host_op_sync__({op_id}, 2n ** 64n)")
@@ -407,7 +403,6 @@ class TestOpValueConversions:
 
             def capture(value):
                 captured.append(value)
-                return None
 
             op_id = runtime.register_op("captureUndefined", capture, mode="sync")
             runtime.eval(f"__host_op_sync__({op_id}, undefined)")
@@ -565,9 +560,9 @@ class TestOpGuarding:
                 return len(audit_log)
 
             op_id = runtime.register_op("record", record)
-            count = runtime.eval("__host_op_sync__({0}, 'a', 'b')".format(op_id))
+            count = runtime.eval(f"__host_op_sync__({op_id}, 'a', 'b')")
             assert count == 1
-            count = runtime.eval("__host_op_sync__({0}, 'c')".format(op_id))
+            count = runtime.eval(f"__host_op_sync__({op_id}, 'c')")
             assert count == 2
             assert audit_log == [("a", "b"), ("c",)]
         finally:

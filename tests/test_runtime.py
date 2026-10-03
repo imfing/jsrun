@@ -600,20 +600,22 @@ class TestRuntimeConversions:
 
     def test_js_to_python_respects_serialization_bytes_limit(self):
         config = RuntimeConfig(max_serialization_bytes=32)
-        with Runtime(config) as runtime:
-            with pytest.raises(
+        with (
+            Runtime(config) as runtime,
+            pytest.raises(
                 RuntimeError,
                 match=r"Size \(\d+ bytes\) exceeded maximum limit of \d+ bytes",
-            ):
-                runtime.eval("'x'.repeat(64)")
+            ),
+        ):
+            runtime.eval("'x'.repeat(64)")
 
     def test_js_to_python_respects_serialization_depth_limit(self):
         config = RuntimeConfig(max_serialization_depth=2)
-        with Runtime(config) as runtime:
-            with pytest.raises(
-                RuntimeError, match=r"Depth exceeded maximum limit of \d+"
-            ):
-                runtime.eval("({a: {b: {c: 1}}})")
+        with (
+            Runtime(config) as runtime,
+            pytest.raises(RuntimeError, match=r"Depth exceeded maximum limit of \d+"),
+        ):
+            runtime.eval("({a: {b: {c: 1}}})")
 
 
 class TestRuntimeBindings:
@@ -872,7 +874,7 @@ class TestRuntimeTimeout:
                 config = RuntimeConfig(timeout=timeout)
                 with Runtime(config) as rt:
                     results[name] = rt.eval(code)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 - collect any failure per thread
                 errors[name] = str(e)
 
         # Fast operation with short timeout
@@ -984,9 +986,8 @@ class TestTimeoutValidation:
     @pytest.mark.asyncio
     async def test_eval_async_timeout_validation(self, timeout_value, expected_error):
         """Test eval_async rejects invalid timeout values."""
-        with Runtime() as runtime:
-            with pytest.raises(ValueError, match=expected_error):
-                await runtime.eval_async("Promise.resolve(1)", timeout=timeout_value)
+        with Runtime() as runtime, pytest.raises(ValueError, match=expected_error):
+            await runtime.eval_async("Promise.resolve(1)", timeout=timeout_value)
 
     @pytest.mark.parametrize(
         "timeout_value,expected_error",
