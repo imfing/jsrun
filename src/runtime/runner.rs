@@ -2654,6 +2654,9 @@ impl RuntimeCoreState {
             Js(JsError),
         }
 
+        // Function-local error enum on a cold path; boxing JsError here is
+        // not worth the indirection.
+        #[allow(clippy::result_large_err)]
         let call_outcome: Result<SyncCallOutcome, SyncCallError> = (|| {
             deno_core::scope!(scope, self.js_runtime);
             v8::tc_scope!(let try_catch, scope);

@@ -1,5 +1,7 @@
 .DEFAULT_GOAL := all
 sources = python/jsrun tests
+# Pinned so lint results stay reproducible; bump deliberately.
+ruff_version = 0.16.10
 
 # using pip install cargo (via maturin via pip) doesn't get the tty handle
 # so doesn't render color without some help
@@ -37,18 +39,18 @@ build-profiling:
 
 .PHONY: format  ## Auto-format rust and python source files
 format:
-	uv tool run ruff format $(sources)
+	uv tool run ruff@$(ruff_version) format $(sources)
 	cargo fmt
 
 .PHONY: lint-python  ## Lint python source files
 lint-python:
-	uv tool run ruff check $(sources)
-	uv tool run ruff format --check $(sources)
+	uv tool run ruff@$(ruff_version) check $(sources)
+	uv tool run ruff@$(ruff_version) format --check $(sources)
 
 .PHONY: lint-python-fix  ## Auto-fix python linting issues
 lint-python-fix:
-	uv tool run ruff check --fix $(sources)
-	uv tool run ruff format $(sources)
+	uv tool run ruff@$(ruff_version) check --fix $(sources)
+	uv tool run ruff@$(ruff_version) format $(sources)
 
 .PHONY: lint-rust  ## Lint rust source files
 lint-rust:

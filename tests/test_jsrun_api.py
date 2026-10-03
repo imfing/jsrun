@@ -4,9 +4,8 @@ import asyncio
 import contextvars
 from concurrent.futures import ThreadPoolExecutor
 
-import pytest
-
 import jsrun
+import pytest
 
 
 class TestModuleLevelEval:
