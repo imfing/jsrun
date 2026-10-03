@@ -1,0 +1,7 @@
+# Single source of truth for the Rust toolchain: rustup picks this up
+# automatically for local builds, CI, and the V8 archive builder containers,
+# so lint results (clippy -D warnings) stay reproducible everywhere.
+# Bump deliberately; `make all` must pass under the new version.
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]

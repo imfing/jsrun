@@ -498,7 +498,6 @@ impl RuntimeConfig {
 mod tests {
     use super::*;
     use pyo3::types::PyFloat;
-    use std::f64;
 
     #[test]
     fn test_default_config() {
