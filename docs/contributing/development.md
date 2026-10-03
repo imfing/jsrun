@@ -6,7 +6,7 @@
     Building on Linux and Windows requires compiling `rusty_v8` from source, which can take 30+ minutes and requires additional dependencies (Python, Clang/LLVM, etc.). See the [rusty_v8 build documentation](https://github.com/denoland/rusty_v8?tab=readme-ov-file#build-v8-from-source) for platform-specific requirements.
 
 - **Python**: 3.10 or higher
-- **Rust**: Latest stable toolchain (install via [rustup](https://rust-lang.org/tools/install/))
+- **Rust**: Install via [rustup](https://rust-lang.org/tools/install/); the version is pinned in `rust-toolchain.toml` and rustup selects it automatically, keeping local builds, lints, and CI on the same toolchain
 - **uv**: Fast Python package manager (install via [uv docs](https://docs.astral.sh/uv/getting-started/installation/))
 - **Make**: Build automation tool (usually pre-installed on macOS/Linux)
 
