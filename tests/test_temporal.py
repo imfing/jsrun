@@ -87,16 +87,22 @@ class TestTemporalToPython:
         with Runtime() as rt:
             rt.bind_function("echo", lambda v: v)
             big = timedelta(days=106751992)
-            assert rt.eval(f"echo(Temporal.Duration.from({{ days: {big.days} }})) !== null")
+            assert rt.eval(
+                f"echo(Temporal.Duration.from({{ days: {big.days} }})) !== null"
+            )
             check = rt.eval("(d) => d")
             assert check(big) == big
 
     def test_zoned_datetime_at_year_boundaries(self):
         with Runtime() as rt:
-            low = rt.eval("Temporal.ZonedDateTime.from('0001-01-01T00:00:00+01:00[+01:00]')")
+            low = rt.eval(
+                "Temporal.ZonedDateTime.from('0001-01-01T00:00:00+01:00[+01:00]')"
+            )
             assert low.year == 1
             assert low.utcoffset() == timedelta(hours=1)
-            high = rt.eval("Temporal.ZonedDateTime.from('9999-12-31T23:59:59-05:00[-05:00]')")
+            high = rt.eval(
+                "Temporal.ZonedDateTime.from('9999-12-31T23:59:59-05:00[-05:00]')"
+            )
             assert high.year == 9999
             assert high.utcoffset() == timedelta(hours=-5)
 
