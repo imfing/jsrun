@@ -83,6 +83,43 @@ class TestTemporalToPython:
             )
             assert rt.eval("Temporal.Duration.from({ days: 3 })") == timedelta(days=3)
 
+    def test_large_duration(self):
+        with Runtime() as rt:
+            rt.bind_function("echo", lambda v: v)
+            big = timedelta(days=106751992)
+            assert rt.eval(f"echo(Temporal.Duration.from({{ days: {big.days} }})) !== null")
+            check = rt.eval("(d) => d")
+            assert check(big) == big
+
+    def test_zoned_datetime_at_year_boundaries(self):
+        with Runtime() as rt:
+            low = rt.eval("Temporal.ZonedDateTime.from('0001-01-01T00:00:00+01:00[+01:00]')")
+            assert low.year == 1
+            assert low.utcoffset() == timedelta(hours=1)
+            high = rt.eval("Temporal.ZonedDateTime.from('9999-12-31T23:59:59-05:00[-05:00]')")
+            assert high.year == 9999
+            assert high.utcoffset() == timedelta(hours=-5)
+
+    def test_zoned_datetime_dst_fold(self):
+        with Runtime() as rt:
+            # 2026-11-01 in America/New_York: 01:30 EDT and 01:30 EST both
+            # exist; the two instants must stay one hour apart after
+            # conversion, with the second occurrence carrying fold=1.
+            first = rt.eval(
+                "Temporal.Instant.from('2026-11-01T05:30:00Z')"
+                ".toZonedDateTimeISO('America/New_York')"
+            )
+            second = rt.eval(
+                "Temporal.Instant.from('2026-11-01T06:30:00Z')"
+                ".toZonedDateTimeISO('America/New_York')"
+            )
+            assert first.utcoffset() == timedelta(hours=-4)  # EDT
+            assert second.utcoffset() == timedelta(hours=-5)  # EST
+            assert second.fold == 1
+            # Same-zone aware subtraction compares wall clocks (ignoring
+            # fold), so compare the actual instants via timestamps.
+            assert second.timestamp() - first.timestamp() == 3600
+
     def test_calendar_relative_duration_not_converted(self):
         with Runtime() as rt:
             # years/months/weeks have no fixed length; stays unconverted.

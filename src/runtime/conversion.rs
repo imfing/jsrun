@@ -115,22 +115,65 @@ fn resolve_timezone<'py>(py: Python<'py>, tz: &str) -> PyResult<pyo3::Bound<'py,
 /// is truncated), optionally converted into the given time zone.
 fn epoch_ns_to_datetime(py: Python<'_>, epoch_ns: i128, tz: Option<&str>) -> PyResult<Py<PyAny>> {
     let datetime_mod = py.import("datetime")?;
-    let secs: i64 = epoch_ns
-        .div_euclid(1_000_000_000)
+    let utc = datetime_mod.getattr("timezone")?.getattr("utc")?;
+    let secs = epoch_ns.div_euclid(1_000_000_000);
+
+    // Determine the zone's UTC offset at this instant, then build the local
+    // wall-clock fields with integer math. Constructing the intermediate UTC
+    // datetime would reject instants whose *local* representation is valid
+    // (e.g. 0001-01-01T00:00:00+01:00 is fine, but its UTC form is year 0).
+    let mut offset_delta = None;
+    let (tzinfo, offset_ns) = match tz {
+        None => (utc.clone(), 0i128),
+        Some(tz) => {
+            let tzinfo = resolve_timezone(py, tz)?;
+            // Probe the offset at a clamped, always-representable instant:
+            // exact whenever the instant itself is in datetime range, and a
+            // best-effort approximation at the extreme year boundaries.
+            let probe_secs: i64 = secs.clamp(-62_135_000_000, 253_300_000_000) as i64;
+            let probe = datetime_mod
+                .getattr("datetime")?
+                .call_method1("fromtimestamp", (probe_secs, &utc))?
+                .call_method1("astimezone", (&tzinfo,))?;
+            let offset = probe.call_method0("utcoffset")?;
+            let days: i128 = offset.getattr("days")?.extract()?;
+            let seconds: i128 = offset.getattr("seconds")?.extract()?;
+            let microseconds: i128 = offset.getattr("microseconds")?.extract()?;
+            let offset_ns = ((days * 86_400 + seconds) * 1_000_000 + microseconds) * 1000;
+            offset_delta = Some(offset);
+            (tzinfo, offset_ns)
+        }
+    };
+
+    let local_ns = epoch_ns + offset_ns;
+    let days = local_ns.div_euclid(86_400_000_000_000);
+    let rem_ns = local_ns.rem_euclid(86_400_000_000_000);
+    // 719_163 is the proleptic-Gregorian ordinal of 1970-01-01.
+    let ordinal: i64 = (days + 719_163)
         .try_into()
         .map_err(|_| PyRuntimeError::new_err("Temporal value out of range for Python datetime"))?;
-    let micros = (epoch_ns.rem_euclid(1_000_000_000) / 1000) as i64;
-    let utc = datetime_mod.getattr("timezone")?.getattr("utc")?;
-    let dt = datetime_mod
+    let py_date = datetime_mod
+        .getattr("date")?
+        .call_method1("fromordinal", (ordinal,))
+        .map_err(|_| PyRuntimeError::new_err("Temporal value out of range for Python datetime"))?;
+    let micros_of_day = rem_ns / 1000;
+    let py_time = datetime_mod.getattr("time")?.call1((
+        (micros_of_day / 3_600_000_000) as i64,
+        (micros_of_day / 60_000_000 % 60) as i64,
+        (micros_of_day / 1_000_000 % 60) as i64,
+        (micros_of_day % 1_000_000) as i64,
+    ))?;
+    let mut dt = datetime_mod
         .getattr("datetime")?
-        .call_method1("fromtimestamp", (secs, utc))?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("microseconds", micros)?;
-    let delta = datetime_mod.getattr("timedelta")?.call((), Some(&kwargs))?;
-    let mut dt = dt.add(delta)?;
-    if let Some(tz) = tz {
-        let tzinfo = resolve_timezone(py, tz)?;
-        dt = dt.call_method1("astimezone", (tzinfo,))?;
+        .call_method1("combine", (py_date, py_time, tzinfo))?;
+    // Ambiguous wall times (DST fall-back) default to fold=0; pick fold=1
+    // when that occurrence is the one matching the instant's actual offset.
+    if let Some(offset_delta) = offset_delta {
+        if !dt.call_method0("utcoffset")?.eq(&offset_delta)? {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("fold", 1)?;
+            dt = dt.call_method("replace", (), Some(&kwargs))?;
+        }
     }
     Ok(dt.unbind())
 }
@@ -183,11 +226,9 @@ fn temporal_to_python(
             ))?
             .unbind(),
         "Duration" => {
-            let micros: i64 = (temporal_field_i128(map, "ns")? / 1000)
-                .try_into()
-                .map_err(|_| {
-                    PyRuntimeError::new_err("Temporal.Duration out of range for Python timedelta")
-                })?;
+            // i128 microseconds convert to an arbitrary-precision Python int;
+            // timedelta's own constructor enforces its range.
+            let micros: i128 = temporal_field_i128(map, "ns")? / 1000;
             let kwargs = PyDict::new(py);
             kwargs.set_item("microseconds", micros)?;
             datetime_mod
