@@ -98,13 +98,13 @@ class TestTemporalToPython:
             low = rt.eval(
                 "Temporal.ZonedDateTime.from('0001-01-01T00:00:00+01:00[+01:00]')"
             )
-            assert low.year == 1
-            assert low.utcoffset() == timedelta(hours=1)
+            assert low == datetime(1, 1, 1, tzinfo=timezone(timedelta(hours=1)))
             high = rt.eval(
                 "Temporal.ZonedDateTime.from('9999-12-31T23:59:59-05:00[-05:00]')"
             )
-            assert high.year == 9999
-            assert high.utcoffset() == timedelta(hours=-5)
+            assert high == datetime(
+                9999, 12, 31, 23, 59, 59, tzinfo=timezone(timedelta(hours=-5))
+            )
 
     def test_zoned_datetime_dst_fold(self):
         with Runtime() as rt:
@@ -125,6 +125,36 @@ class TestTemporalToPython:
             # Same-zone aware subtraction compares wall clocks (ignoring
             # fold), so compare the actual instants via timestamps.
             assert second.timestamp() - first.timestamp() == 3600
+
+    @pytest.mark.parametrize("year", [9997, 9998, 9999])
+    @pytest.mark.parametrize(
+        ("zone", "month", "day", "hour"),
+        [
+            ("Europe/London", 1, 1, 12),
+            ("Europe/London", 12, 31, 23),
+            ("America/New_York", 1, 1, 12),
+            ("Pacific/Auckland", 7, 1, 12),
+        ],
+    )
+    def test_zoned_datetime_near_max_year_preserves_instant(
+        self, year, zone, month, day, hour
+    ):
+        expected = datetime(year, month, day, hour, 30, tzinfo=ZoneInfo(zone))
+        expression = (
+            f"Temporal.ZonedDateTime.from("
+            f"'{year}-{month:02}-{day:02}T{hour:02}:30:00[{zone}]')"
+        )
+        captured = []
+        with Runtime() as rt:
+            result = rt.eval(expression)
+            rt.bind_function("capture", captured.append)
+            rt.eval(f"capture({expression})")
+
+        for actual in [result, captured[0]]:
+            assert actual == expected
+            assert actual.utcoffset() == expected.utcoffset()
+            assert actual.fold == 0
+            assert actual.timestamp() == expected.timestamp()
 
     def test_calendar_relative_duration_not_converted(self):
         with Runtime() as rt:

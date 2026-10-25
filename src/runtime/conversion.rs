@@ -127,10 +127,18 @@ fn epoch_ns_to_datetime(py: Python<'_>, epoch_ns: i128, tz: Option<&str>) -> PyR
         None => (utc.clone(), 0i128),
         Some(tz) => {
             let tzinfo = resolve_timezone(py, tz)?;
-            // Probe the offset at a clamped, always-representable instant:
-            // exact whenever the instant itself is in datetime range, and a
-            // best-effort approximation at the extreme year boundaries.
-            let probe_secs: i64 = secs.clamp(-62_135_000_000, 253_300_000_000) as i64;
+            // Use the actual instant whenever its UTC form is representable.
+            // Only UTC instants outside years 1..=9999 need a nearby probe;
+            // leave one day of room for astimezone's local offset in that case.
+            const MIN_DATETIME_SECONDS: i128 = -62_135_596_800; // 0001-01-01 UTC
+            const MAX_DATETIME_SECONDS: i128 = 253_402_300_799; // 9999-12-31 23:59:59 UTC
+            let probe_secs = if secs < MIN_DATETIME_SECONDS {
+                MIN_DATETIME_SECONDS + 86_400
+            } else if secs > MAX_DATETIME_SECONDS {
+                MAX_DATETIME_SECONDS - 86_400
+            } else {
+                secs
+            } as i64;
             let probe = datetime_mod
                 .getattr("datetime")?
                 .call_method1("fromtimestamp", (probe_secs, &utc))?
