@@ -1574,6 +1574,31 @@ class TestRuntimeNativeTypes:
                 or "depth" in str(exc_info.value).lower()
             )
 
+    def test_eval_large_acyclic_graph_is_not_circular(self):
+        """Test that an identity hash collision is not reported as a cycle.
+
+        V8 identity hashes are random and not unique: with this many leaves under a
+        chain of ancestors, some leaf shares a hash with an ancestor in most runs.
+        The Rust unit test reproduces the collision deterministically.
+        """
+        chain, leaves = 24, 300_000
+        with Runtime() as runtime:
+            result = runtime.eval(
+                f"""
+                (() => {{
+                    const root = {{}};
+                    let node = root;
+                    for (let i = 0; i < {chain}; i++) node = node.next = {{}};
+                    node.leaves = Array.from({{ length: {leaves} }}, () => ({{}}));
+                    return root;
+                }})()
+                """
+            )
+        node = result
+        for _ in range(chain):
+            node = node["next"]
+        assert node["leaves"] == [{}] * leaves
+
     def test_eval_bigint_handles_large_values(self):
         """Test that BigInt values round-trip without overflow."""
         with Runtime() as runtime:

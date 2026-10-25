@@ -2946,13 +2946,18 @@ impl RuntimeCoreState {
     }
 
     /// Internal recursive converter with cycle detection and optional receiver capture.
+    ///
+    /// `seen` holds the objects on the current path. `v8::Local<v8::Object>` hashes by
+    /// the V8 identity hash but compares by object identity: identity hashes are not
+    /// unique, so tracking the hashes alone would report a cycle whenever an object's
+    /// hash collides with one of its ancestors'.
     #[allow(clippy::too_many_arguments)]
     fn value_to_js_value_internal<'s>(
         fn_registry: &Rc<RefCell<HashMap<u32, StoredFunction>>>,
         next_fn_id: &Rc<RefCell<u32>>,
         scope: &mut v8::PinScope<'s, '_>,
         value: v8::Local<'s, v8::Value>,
-        seen: &mut HashSet<i32>,
+        seen: &mut HashSet<v8::Local<'s, v8::Object>>,
         tracker: &mut LimitTracker,
         receiver: Option<v8::Global<v8::Value>>,
         stream_registry: Rc<JsStreamRegistry>,
@@ -3069,12 +3074,10 @@ impl RuntimeCoreState {
             }
             Ok(JSValue::Bytes(buffer))
         } else if value.is_array() {
-            // Check for circular reference using identity hash
+            // Check for circular reference by object identity
             let obj = v8::Local::<v8::Object>::try_from(value)
                 .map_err(|_| RuntimeError::internal("Failed to cast array to object"))?;
-            let hash = obj.get_identity_hash().get();
-
-            if !seen.insert(hash) {
+            if !seen.insert(obj) {
                 return Err(RuntimeError::internal(
                     "Cannot serialize circular reference",
                 ));
@@ -3102,14 +3105,12 @@ impl RuntimeCoreState {
                 )?);
             }
 
-            seen.remove(&hash);
+            seen.remove(&obj);
             Ok(JSValue::Array(items))
         } else if value.is_set() {
             let obj = v8::Local::<v8::Object>::try_from(value)
                 .map_err(|_| RuntimeError::internal("Failed to cast set to object"))?;
-            let hash = obj.get_identity_hash().get();
-
-            if !seen.insert(hash) {
+            if !seen.insert(obj) {
                 return Err(RuntimeError::internal(
                     "Cannot serialize circular reference",
                 ));
@@ -3140,7 +3141,7 @@ impl RuntimeCoreState {
                 )?);
             }
 
-            seen.remove(&hash);
+            seen.remove(&obj);
             Ok(JSValue::Set(values))
         } else if value.is_date() {
             let date = v8::Local::<v8::Date>::try_from(value)
@@ -3156,12 +3157,10 @@ impl RuntimeCoreState {
             tracker.add_bytes(size_of::<u32>())?;
             Ok(JSValue::JsStream { id: stream_id })
         } else if value.is_object() {
-            // Check for circular reference using identity hash
+            // Check for circular reference by object identity
             let obj = v8::Local::<v8::Object>::try_from(value)
                 .map_err(|_| RuntimeError::internal("Failed to cast to object"))?;
-            let hash = obj.get_identity_hash().get();
-
-            if !seen.insert(hash) {
+            if !seen.insert(obj) {
                 return Err(RuntimeError::internal(
                     "Cannot serialize circular reference",
                 ));
@@ -3210,7 +3209,7 @@ impl RuntimeCoreState {
                 );
             }
 
-            seen.remove(&hash);
+            seen.remove(&obj);
             Ok(JSValue::Object(map))
         } else {
             // Fallback: convert to string
@@ -3258,5 +3257,82 @@ mod tests {
             "runtime thread should exit after command channel closes"
         );
         drop(termination);
+    }
+
+    fn convert<'s>(
+        scope: &mut v8::PinScope<'s, '_>,
+        value: v8::Local<'s, v8::Value>,
+    ) -> RuntimeResult<JSValue> {
+        RuntimeCoreState::value_to_js_value(
+            &Rc::new(RefCell::new(HashMap::new())),
+            &Rc::new(RefCell::new(0)),
+            scope,
+            value,
+            SerializationLimits::default(),
+            Rc::new(JsStreamRegistry::new()),
+        )
+    }
+
+    #[test]
+    fn identity_hash_collision_is_not_a_circular_reference() {
+        let mut js_runtime = JsRuntime::new(RuntimeOptions::default());
+        deno_core::scope!(scope, js_runtime);
+
+        // Identity hashes are random and drawn from a small range (21 bits in V8 150),
+        // so two distinct objects sharing one turn up after a few thousand allocations.
+        let mut objects_by_hash = HashMap::new();
+        let (parent, child) = (0..1 << 22)
+            .find_map(|_| {
+                let object = v8::Object::new(scope);
+                objects_by_hash
+                    .insert(object.get_identity_hash(), object)
+                    .map(|previous| (previous, object))
+            })
+            .expect("no identity hash collision found");
+        let key = v8::String::new(scope, "child").unwrap();
+        parent.set(scope, key.into(), child.into()).unwrap();
+
+        let expected = IndexMap::from([("child".to_string(), JSValue::Object(IndexMap::new()))]);
+        assert_eq!(
+            convert(scope, parent.into()).unwrap(),
+            JSValue::Object(expected)
+        );
+    }
+
+    #[test]
+    fn circular_reference_is_detected() {
+        let mut js_runtime = JsRuntime::new(RuntimeOptions::default());
+        deno_core::scope!(scope, js_runtime);
+
+        let object = v8::Object::new(scope);
+        let key = v8::String::new(scope, "self").unwrap();
+        object.set(scope, key.into(), object.into()).unwrap();
+
+        assert!(matches!(
+            convert(scope, object.into()),
+            Err(RuntimeError::Internal { context }) if context.contains("circular reference")
+        ));
+    }
+
+    #[test]
+    fn shared_reference_is_not_a_circular_reference() {
+        let mut js_runtime = JsRuntime::new(RuntimeOptions::default());
+        deno_core::scope!(scope, js_runtime);
+
+        let shared = v8::Object::new(scope);
+        let parent = v8::Object::new(scope);
+        for name in ["a", "b"] {
+            let key = v8::String::new(scope, name).unwrap();
+            parent.set(scope, key.into(), shared.into()).unwrap();
+        }
+
+        let expected = IndexMap::from([
+            ("a".to_string(), JSValue::Object(IndexMap::new())),
+            ("b".to_string(), JSValue::Object(IndexMap::new())),
+        ]);
+        assert_eq!(
+            convert(scope, parent.into()).unwrap(),
+            JSValue::Object(expected)
+        );
     }
 }
