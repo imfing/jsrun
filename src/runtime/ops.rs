@@ -340,6 +340,110 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
     };
   }
 
+  // Temporal values cross the boundary as tagged plain objects (their data
+  // lives in internal slots, so generic object conversion yields {}).
+  // Calendar-dependent fields are normalized to ISO; Durations with
+  // years/months/weeks are calendar-relative and stay unconverted.
+  function temporalPrepare(value) {
+    if (typeof Temporal === "undefined" || value === null || typeof value !== "object") {
+      return undefined;
+    }
+    try {
+      if (value instanceof Temporal.Instant) {
+        return { __jsrun_type: "Temporal", kind: "Instant", epoch_ns: value.epochNanoseconds.toString() };
+      }
+      if (value instanceof Temporal.ZonedDateTime) {
+        return {
+          __jsrun_type: "Temporal",
+          kind: "ZonedDateTime",
+          epoch_ns: value.epochNanoseconds.toString(),
+          time_zone: value.timeZoneId,
+        };
+      }
+      if (value instanceof Temporal.PlainDate) {
+        const d = value.withCalendar("iso8601");
+        return { __jsrun_type: "Temporal", kind: "PlainDate", year: d.year, month: d.month, day: d.day };
+      }
+      if (value instanceof Temporal.PlainDateTime) {
+        const d = value.withCalendar("iso8601");
+        return {
+          __jsrun_type: "Temporal",
+          kind: "PlainDateTime",
+          year: d.year, month: d.month, day: d.day,
+          hour: d.hour, minute: d.minute, second: d.second,
+          nanosecond: d.millisecond * 1e6 + d.microsecond * 1e3 + d.nanosecond,
+        };
+      }
+      if (value instanceof Temporal.PlainTime) {
+        return {
+          __jsrun_type: "Temporal",
+          kind: "PlainTime",
+          hour: value.hour, minute: value.minute, second: value.second,
+          nanosecond: value.millisecond * 1e6 + value.microsecond * 1e3 + value.nanosecond,
+        };
+      }
+      if (value instanceof Temporal.Duration) {
+        if (value.years !== 0 || value.months !== 0 || value.weeks !== 0) {
+          return undefined;
+        }
+        const seconds =
+          ((BigInt(value.days) * 24n + BigInt(value.hours)) * 60n + BigInt(value.minutes)) * 60n +
+          BigInt(value.seconds);
+        const total =
+          seconds * 1000000000n +
+          BigInt(value.milliseconds) * 1000000n +
+          BigInt(value.microseconds) * 1000n +
+          BigInt(value.nanoseconds);
+        return { __jsrun_type: "Temporal", kind: "Duration", ns: total.toString() };
+      }
+    } catch (_) {
+      // fall through to generic conversion
+    }
+    return undefined;
+  }
+
+  function temporalRevive(entry) {
+    if (typeof Temporal === "undefined") {
+      return entry;
+    }
+    switch (entry.kind) {
+      case "Instant":
+        return Temporal.Instant.fromEpochNanoseconds(BigInt(entry.epoch_ns));
+      case "ZonedDateTime":
+        return new Temporal.ZonedDateTime(BigInt(entry.epoch_ns), entry.time_zone);
+      case "PlainDate":
+        return new Temporal.PlainDate(entry.year, entry.month, entry.day);
+      case "PlainTime": {
+        const ns = Number(entry.nanosecond);
+        return new Temporal.PlainTime(
+          entry.hour, entry.minute, entry.second,
+          Math.floor(ns / 1e6), Math.floor(ns / 1e3) % 1000, ns % 1000,
+        );
+      }
+      case "PlainDateTime": {
+        const ns = Number(entry.nanosecond);
+        return new Temporal.PlainDateTime(
+          entry.year, entry.month, entry.day,
+          entry.hour, entry.minute, entry.second,
+          Math.floor(ns / 1e6), Math.floor(ns / 1e3) % 1000, ns % 1000,
+        );
+      }
+      case "Duration": {
+        const total = BigInt(entry.ns);
+        const sign = total < 0n ? -1n : 1n;
+        const abs = total * sign;
+        return new Temporal.Duration(
+          0, 0, 0, 0, 0, 0,
+          Number((abs / 1000000000n) * sign), 0, 0,
+          Number((abs % 1000000000n) * sign),
+        );
+      }
+    }
+    return entry;
+  }
+  globalThis.__jsrun_temporal_prepare = temporalPrepare;
+  globalThis.__jsrun_temporal_revive = temporalRevive;
+
   function prepare(value) {
     if (value === undefined || value === null) {
       return value;
@@ -352,6 +456,10 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
     }
     if (value instanceof Date) {
       return { __jsrun_type: "Date", epoch_ms: value.valueOf() };
+    }
+    const temporal = temporalPrepare(value);
+    if (temporal !== undefined) {
+      return temporal;
     }
     if (value instanceof Set) {
       return {
@@ -407,6 +515,8 @@ pub fn python_extension(registry: PythonOpRegistry) -> Extension {
         }
         case "BigInt":
           return BigInt(value.value);
+        case "Temporal":
+          return temporalRevive(value);
         case "PyStream":
           if (typeof globalThis.__jsrun_from_py_stream === "function") {
             return globalThis.__jsrun_from_py_stream(value.id);

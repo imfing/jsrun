@@ -108,6 +108,36 @@ with Runtime() as runtime:
 
 All datetime values are normalized to UTC during conversion. If you pass a naive (timezone-unaware) Python datetime, it will be treated as UTC.
 
+### Temporal
+
+JavaScript's [Temporal][temporal] API (available natively in the bundled V8 engine) converts to Python's native date/time types, and Python `date`, `time`, and `timedelta` values convert to Temporal instances:
+
+| JavaScript | Python | Notes |
+|---|---|---|
+| `Temporal.Instant` | aware `datetime` (UTC) | sub-microsecond precision truncated |
+| `Temporal.ZonedDateTime` | aware `datetime` (`ZoneInfo` or fixed offset) | |
+| `Temporal.PlainDate` | `date` | non-ISO calendars normalized to ISO |
+| `Temporal.PlainTime` | `time` | |
+| `Temporal.PlainDateTime` | naive `datetime` | |
+| `Temporal.Duration` | `timedelta` | |
+
+```python
+from datetime import date, timedelta
+
+with Runtime() as runtime:
+    # Temporal → Python
+    d = runtime.eval("Temporal.PlainDate.from('2026-10-03')")
+    assert d == date(2026, 10, 3)
+
+    # Python → Temporal
+    check = runtime.eval("(d) => d instanceof Temporal.PlainDate")
+    assert check(date(2026, 10, 3)) is True
+```
+
+Two asymmetries to be aware of: Python `datetime` still converts to a JavaScript `Date` (not Temporal) for backwards compatibility, and `Temporal.Duration` values with nonzero `years`/`months`/`weeks` are calendar-relative with no fixed length, so they are not converted to `timedelta`.
+
+[temporal]: https://tc39.es/proposal-temporal/docs/
+
 ## Binary Data
 
 Binary data is represented as `bytes` in Python and `Uint8Array` in JavaScript:
